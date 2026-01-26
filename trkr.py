@@ -24,6 +24,19 @@ class PhraseStep:
 class Phrase:
     steps: List[PhraseStep] = field(default_factory=lambda: [PhraseStep() for _ in range(16)])
 
+def midi_to_note(midi_number):
+    """Convert MIDI number to note representation using flats."""
+    if not 0 <= midi_number <= 127:
+        raise ValueError("MIDI number must be between 0 and 127")
+
+    # Note names using flats
+    note_names = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B']
+
+    octave = (midi_number // 12) - 1
+    note = note_names[midi_number % 12]
+
+    return f"{note}{octave}"
+
 class MidiTracker:
     def __init__(self):
         self.phrases = {i: Phrase() for i in range(128)}
@@ -148,7 +161,7 @@ class MidiTracker:
             self.playback_thread = threading.Thread(target=self.playback_loop, daemon=True)
             self.playback_thread.start()
     
-    def stop_playback(self):
+    def stop_playback_func(self):
         """Stop playback, waiting for current bar to finish in pattern mode"""
         if self.play_mode == "pattern":
             self.pending_stop = True
@@ -162,7 +175,7 @@ class MidiTracker:
         """Toggle between pattern and song mode"""
         was_playing = self.playing
         if was_playing:
-            self.stop_playback()
+            self.stop_playback_func()
             if self.playback_thread:
                 self.playback_thread.join(timeout=1.0)
         
@@ -235,7 +248,8 @@ class MidiTracker:
             stdscr.addstr(height - 4 + i, 2, ctrl, curses.color_pair(5))
         
         stdscr.refresh()
-    
+
+ 
     def draw_phrase(self, stdscr):
         height, width = stdscr.getmaxyx()
         stdscr.clear()
@@ -273,7 +287,7 @@ class MidiTracker:
             stdscr.addstr(y, 2, f" {i:02d}  │ ", row_attr | curses.A_BOLD)
             
             # Note
-            note_text = f"{step.note:3d}" if step.note is not None else "---"
+            note_text = f"{midi_to_note(step.note)}" if step.note is not None else "---"
             attr = curses.A_REVERSE if i == self.phrase_cursor and self.phrase_field == 0 else row_attr
             stdscr.addstr(y, 10, note_text, attr)
             
@@ -337,6 +351,9 @@ class MidiTracker:
         elif key == curses.KEY_BACKSPACE or key == 127:
             if self.phrase_field == 0:
                 step.note = None
+        elif key == ord('\n'):
+            if self.phrase_field == 0:  # Note
+                step.note = 60
         elif ord('0') <= key <= ord('9'):
             # Number input for direct value entry
             digit = key - ord('0')
@@ -388,8 +405,10 @@ class MidiTracker:
                 self.cursor_col = min(7, self.cursor_col + 1)
             elif key == curses.KEY_SLEFT:  # Shift+Left
                 self.current_phrase_num = max(0, self.current_phrase_num - 1)
+                self.arrangement[self.cursor_row][self.cursor_col] = self.current_phrase_num
             elif key == curses.KEY_SRIGHT:  # Shift+Right
                 self.current_phrase_num = min(127, self.current_phrase_num + 1)
+                self.arrangement[self.cursor_row][self.cursor_col] = self.current_phrase_num
             elif key == ord('\n'):  # Enter
                 existing = self.arrangement[self.cursor_row][self.cursor_col]
                 if existing is not None:
@@ -401,7 +420,7 @@ class MidiTracker:
                 else:
                     # Place current phrase number
                     self.arrangement[self.cursor_row][self.cursor_col] = self.current_phrase_num
-            elif key == 383:  # Shift+Backspace (may vary by terminal)
+            elif key == curses.KEY_BACKSPACE:  
                 self.arrangement[self.cursor_row][self.cursor_col] = None
             elif key == ord(' '):
                 if self.play_mode == "pattern":
@@ -410,14 +429,10 @@ class MidiTracker:
                 else:
                     # In song mode, space toggles play/stop
                     if self.playing:
-                        self.stop_playback()
+                        self.stop_playback_func()
                     else:
                         self.start_playback(self.cursor_row)
-            elif key == curses.KEY_BACKSPACE or key == 127:
-                # Backspace stops playback in pattern mode
-                if self.play_mode == "pattern" and self.playing:
-                    self.stop_playback()
-            elif key == 0 or key == 32 + 128:  # Shift+Space
+            elif key == ord('\t'): 
                 self.toggle_play_mode()
             elif key == ord('t') or key == ord('T'):
                 # Simple tempo adjustment
@@ -433,7 +448,7 @@ class MidiTracker:
                     pass
             elif key == ord('q') or key == ord('Q'):
                 if self.playing:
-                    self.stop_playback()
+                    self.stop_playback_func()
                     if self.playback_thread:
                         self.playback_thread.join(timeout=1.0)
                 break
