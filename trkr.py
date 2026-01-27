@@ -25,6 +25,8 @@ class Phrase:
     steps: List[PhraseStep] = field(default_factory=lambda: [PhraseStep() for _ in range(16)])
 
 def midi_to_note(midi_number):
+    if midi_number is None:
+        return "---"
     """Convert MIDI number to note representation using flats."""
     if not 0 <= midi_number <= 127:
         raise ValueError("MIDI number must be between 0 and 127")
@@ -41,6 +43,7 @@ class MidiTracker:
     def __init__(self):
         self.phrases = {i: Phrase() for i in range(128)}
         self.arrangement = [[None for _ in range(8)] for _ in range(64)]
+        self.current_notes = [None] * 8 
         self.current_phrase_num = 0
         self.cursor_row = 0
         self.cursor_col = 0
@@ -70,6 +73,14 @@ class MidiTracker:
             "1/7", "2/7", "3/7", "4/7", "5/7", "6/7", "7/7", "1/8", "2/8", "3/8", "4/8",
             "5/8", "6/8", "7/8", "8/8"
         ]
+
+    def get_current_note(self, channel):
+        """Get the current note name for a channel."""
+        note_num = self.current_notes[channel]
+        # print(f"{note_num}")
+        if note_num is not None:
+            return midi_to_note(note_num)
+        return None
     
     def should_trigger(self, step, step_key):
         if random.random() * 100 > step.probability:
@@ -118,8 +129,10 @@ class MidiTracker:
                         if step.note is not None:
                             step_key = f"{self.current_row}_{channel}_{step_idx}"
                             if self.should_trigger(step, step_key):
+                                self.current_notes[channel] = step.note
                                 self.send_midi(channel, step.note, step.velocity)
-                        
+                        # else:
+                            # self.current_notes[channel] = None
                         self.current_steps[channel] = (step_idx + 1) % 16
                 
                 # Check if we've completed a bar (all steps back to 0)
@@ -184,71 +197,271 @@ class MidiTracker:
         self.pending_stop = False
         self.next_row = None
     
+    # def draw_arrangement(self, stdscr):
+    #     height, width = stdscr.getmaxyx()
+    #     stdscr.clear()
+        
+    #     # Header
+    #     stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+    #     title = f" MIDI PHRASE TRACKER - ARRANGEMENT "
+    #     stdscr.addstr(1, 2, title, curses.A_BOLD | curses.color_pair(1))
+        
+    #     play_status = "PLAYING" if self.playing else ("STOPPING..." if self.pending_stop else "STOPPED")
+    #     status = f"PHRASE:{self.current_phrase_num:03d} | MODE:{self.play_mode.upper()} | "
+    #     status += f"{play_status} | TEMPO:{self.tempo} | ROW:{self.current_row:02d}"
+    #     stdscr.addstr(1, width - len(status) - 2, status, curses.color_pair(2))
+    #     stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+        
+    #     # Column headers
+    #     headers = "ROW │ CH1  CH2  CH3  CH4  CH5  CH6  CH7  CH8"
+    #     stdscr.addstr(3, 2, headers, curses.A_BOLD)
+    #     stdscr.addstr(4, 0, "─" * (width - 1))
+        
+    #     # Arrangement grid
+    #     start_row = max(0, self.cursor_row - 10)
+    #     for i in range(start_row, min(64, start_row + height - 10)):
+    #         y = 5 + (i - start_row)
+    #         if y >= height - 5:
+    #             break
+            
+    #         # Row number
+    #         row_attr = curses.A_BOLD if i == self.current_row and self.playing else 0
+    #         stdscr.addstr(y, 2, f"{i:02d}  │ ", row_attr | curses.color_pair(3))
+            
+    #         # Channels
+    #         for ch in range(8):
+    #             x = 9 + (ch * 5)
+    #             phrase_num = self.arrangement[i][ch]
+                
+    #             text = f"{phrase_num:03d}" if phrase_num is not None else "---"
+                
+    #             attr = 0
+    #             if i == self.cursor_row and ch == self.cursor_col:
+    #                 attr = curses.A_REVERSE
+    #             elif i == self.current_row and self.playing and phrase_num is not None:
+    #                 attr = curses.color_pair(4)
+                
+    #             stdscr.addstr(y, x, text, attr)
+        
+    #     # Footer with controls
+    #     stdscr.addstr(height - 5, 0, "─" * (width - 1))
+        
+    #     if self.play_mode == "pattern":
+    #         controls = [
+    #             "ARROWS:Navigate | ENTER:Edit Phrase | SHIFT+←→:Change Phrase# | SHIFT+BKSP:Remove",
+    #             "SPACE:Play Row | BKSP:Stop | SHIFT+SPACE:Toggle Mode | T:Tempo | Q:Quit"
+    #         ]
+    #     else:
+    #         controls = [
+    #             "ARROWS:Navigate | ENTER:Edit Phrase | SHIFT+←→:Change Phrase# | SHIFT+BKSP:Remove", 
+    #             "SPACE:Play/Stop Song | SHIFT+SPACE:Toggle Mode | T:Tempo | Q:Quit"
+    #         ]
+        
+    #     for i, ctrl in enumerate(controls):
+    #         stdscr.addstr(height - 4 + i, 2, ctrl, curses.color_pair(5))
+        
+    #     stdscr.refresh()
+
+    def select_midi_port(self, stdscr):
+        """Display a menu to select MIDI output port."""
+        import mido
+    
+        # Get available MIDI output ports
+        available_ports = mido.get_output_names()
+    
+        if not available_ports:
+            # No ports available - show error message
+            height, width = stdscr.getmaxyx()
+            stdscr.clear()
+            stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+            stdscr.addstr(1, 2, " MIDI PORT SELECTION ", curses.A_BOLD | curses.color_pair(1))
+            stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+        
+            stdscr.addstr(5, 2, "ERROR: No MIDI output ports found!", curses.color_pair(2) | curses.A_BOLD)
+            stdscr.addstr(7, 2, "Press any key to return...")
+            stdscr.refresh()
+            stdscr.getch()
+            return None
+    
+        selected_idx = 0
+    
+        while True:
+            height, width = stdscr.getmaxyx()
+            stdscr.clear()
+        
+            # Header
+            stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+            stdscr.addstr(1, 2, " MIDI PORT SELECTION ", curses.A_BOLD | curses.color_pair(1))
+            stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+        
+            # Instructions
+            stdscr.addstr(4, 2, "Select MIDI Output Port:", curses.A_BOLD)
+            stdscr.addstr(5, 0, "─" * (width - 1))
+        
+            # Port list
+            for i, port_name in enumerate(available_ports):
+                y = 7 + i
+                if y >= height - 6:
+                    break
+            
+                if i == selected_idx:
+                    attr = curses.A_REVERSE | curses.A_BOLD
+                    prefix = "► "
+                else:
+                    attr = 0
+                    prefix = "  "
+            
+                # Truncate port name if too long
+                max_port_len = width - 10
+                display_name = port_name if len(port_name) <= max_port_len else port_name[:max_port_len-3] + "..."
+            
+                stdscr.addstr(y, 4, f"{prefix}{i+1}. {display_name}", attr)
+        
+            # Footer
+            footer_y = height - 5
+            stdscr.addstr(footer_y, 0, "─" * (width - 1))
+        
+            controls = [
+                "↑/↓: Navigate | ENTER: Select Port | ESC: Cancel",
+                f"Current: {self.output.name if hasattr(self, 'output') and self.output else 'None'}"
+            ]
+        
+            for i, ctrl in enumerate(controls):
+                stdscr.addstr(footer_y + 1 + i, 2, ctrl, curses.color_pair(5))
+        
+            stdscr.refresh()
+        
+            # Handle input
+            key = stdscr.getch()
+        
+            if key == curses.KEY_UP:
+                selected_idx = (selected_idx - 1) % len(available_ports)
+            elif key == curses.KEY_DOWN:
+                selected_idx = (selected_idx + 1) % len(available_ports)
+            elif key == ord('\n'):  # Enter key
+                return available_ports[selected_idx]
+            elif key == 27:  # ESC key
+                return None
+            elif ord('1') <= key <= ord('9'):  # Number keys for quick selection
+                num = key - ord('0')
+                if 1 <= num <= len(available_ports):
+                    return available_ports[num - 1]
+
+
+    def change_midi_port(self, stdscr, new_port_name):
+        """Change the MIDI output port."""
+        import mido
+    
+        try:
+            # Close existing port if open
+            if hasattr(self, 'output') and self.output:
+                # Send all notes off before closing
+                for ch in range(16):
+                    self.output.send(mido.Message('control_change', control=123, value=0, channel=ch))
+                self.output.close()
+        
+            # Open new port
+            self.output = mido.open_output(new_port_name)
+        
+            # Reset current notes tracking
+            # self.current_notes = [None] * 8
+        
+            return True
+        except Exception as e:
+            # Show error message
+            height, width = stdscr.getmaxyx()
+            stdscr.clear()
+            stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+            stdscr.addstr(1, 2, " ERROR ", curses.A_BOLD | curses.color_pair(2))
+            stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+        
+            stdscr.addstr(5, 2, f"Failed to open MIDI port: {new_port_name}", curses.color_pair(2))
+            stdscr.addstr(6, 2, f"Error: {str(e)}", curses.color_pair(2))
+            stdscr.addstr(8, 2, "Press any key to return...")
+            stdscr.refresh()
+            stdscr.getch()
+            return False
+
     def draw_arrangement(self, stdscr):
         height, width = stdscr.getmaxyx()
         stdscr.clear()
-        
+    
         # Header
         stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
         title = f" MIDI PHRASE TRACKER - ARRANGEMENT "
         stdscr.addstr(1, 2, title, curses.A_BOLD | curses.color_pair(1))
-        
+    
         play_status = "PLAYING" if self.playing else ("STOPPING..." if self.pending_stop else "STOPPED")
         status = f"PHRASE:{self.current_phrase_num:03d} | MODE:{self.play_mode.upper()} | "
         status += f"{play_status} | TEMPO:{self.tempo} | ROW:{self.current_row:02d}"
         stdscr.addstr(1, width - len(status) - 2, status, curses.color_pair(2))
         stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
-        
+    
         # Column headers
-        headers = "ROW │ CH1  CH2  CH3  CH4  CH5  CH6  CH7  CH8"
+        headers = "ROW │ CH1  CH2  CH3  CH4  CH5  CH6  CH7  CH8 │ CURRENT NOTES"
         stdscr.addstr(3, 2, headers, curses.A_BOLD)
         stdscr.addstr(4, 0, "─" * (width - 1))
-        
+    
         # Arrangement grid
         start_row = max(0, self.cursor_row - 10)
         for i in range(start_row, min(64, start_row + height - 10)):
             y = 5 + (i - start_row)
             if y >= height - 5:
                 break
-            
+        
             # Row number
             row_attr = curses.A_BOLD if i == self.current_row and self.playing else 0
             stdscr.addstr(y, 2, f"{i:02d}  │ ", row_attr | curses.color_pair(3))
-            
+        
             # Channels
             for ch in range(8):
                 x = 9 + (ch * 5)
                 phrase_num = self.arrangement[i][ch]
-                
+            
                 text = f"{phrase_num:03d}" if phrase_num is not None else "---"
-                
+            
                 attr = 0
                 if i == self.cursor_row and ch == self.cursor_col:
                     attr = curses.A_REVERSE
                 elif i == self.current_row and self.playing and phrase_num is not None:
                     attr = curses.color_pair(4)
-                
+            
                 stdscr.addstr(y, x, text, attr)
+    
+        # Current notes column (aligned to the right of the channels)
+        notes_x = 9 + (8 * 5) + 2  # After all 8 channels + separator
+    
+        # Draw separator
+        for i in range(start_row, min(64, start_row + height - 10)):
+            y = 5 + (i - start_row)
+            if y >= height - 5:
+                break
+            stdscr.addstr(y, notes_x - 2, "│")
+    
+        stdscr.addstr(5, notes_x, f"{midi_to_note(self.current_notes[0]):<3}|{midi_to_note(self.current_notes[1]):<3}", attr)
+        stdscr.addstr(6, notes_x, f"{midi_to_note(self.current_notes[2]):<3}|{midi_to_note(self.current_notes[3]):<3}", attr)
+        stdscr.addstr(7, notes_x, f"{midi_to_note(self.current_notes[4]):<3}|{midi_to_note(self.current_notes[5]):<3}", attr)
+        stdscr.addstr(8, notes_x, f"{midi_to_note(self.current_notes[6]):<3}|{midi_to_note(self.current_notes[7]):<3}", attr)
+        
         
         # Footer with controls
         stdscr.addstr(height - 5, 0, "─" * (width - 1))
-        
+    
         if self.play_mode == "pattern":
             controls = [
-                "ARROWS:Navigate | ENTER:Edit Phrase | SHIFT+←→:Change Phrase# | SHIFT+BKSP:Remove",
-                "SPACE:Play Row | BKSP:Stop | SHIFT+SPACE:Toggle Mode | T:Tempo | Q:Quit"
+                "ARROWS:Navigate | ENTER:Edit Phrase | SHIFT+←→:Change Phrase# | BKSP:Remove",
+                "SPACE:Play Row | TAB:Toggle Mode/Stop Play | T:Tempo | Q:Quit"
             ]
         else:
             controls = [
                 "ARROWS:Navigate | ENTER:Edit Phrase | SHIFT+←→:Change Phrase# | SHIFT+BKSP:Remove", 
                 "SPACE:Play/Stop Song | SHIFT+SPACE:Toggle Mode | T:Tempo | Q:Quit"
             ]
-        
+    
         for i, ctrl in enumerate(controls):
             stdscr.addstr(height - 4 + i, 2, ctrl, curses.color_pair(5))
-        
+    
         stdscr.refresh()
-
  
     def draw_phrase(self, stdscr):
         height, width = stdscr.getmaxyx()
@@ -309,8 +522,8 @@ class MidiTracker:
         # Footer
         stdscr.addstr(height - 4, 0, "─" * (width - 1))
         controls = [
-            "↑↓:Navigate Steps | ←→:Navigate Fields | +/-:Adjust Value | ESC:Back to Arrangement",
-            "0-9:Enter Value | BACKSPACE:Clear Note | TAB:Next Condition"
+            "↑↓:Navigate Steps | ←→:Navigate Fields | SHIFT+←→:Adjust Value",
+            "BACKSPACE:Clear Note | ESC:Back to Arrangement"
         ]
         for i, ctrl in enumerate(controls):
             stdscr.addstr(height - 3 + i, 2, ctrl, curses.color_pair(5))
@@ -329,40 +542,32 @@ class MidiTracker:
             self.phrase_field = max(0, self.phrase_field - 1)
         elif key == curses.KEY_RIGHT:
             self.phrase_field = min(3, self.phrase_field + 1)
-        elif key == ord('+') or key == ord('='):
+        elif key == curses.KEY_SRIGHT:
             if self.phrase_field == 0:  # Note
                 step.note = min(127, (step.note or 60) + 1)
             elif self.phrase_field == 1:  # Velocity
                 step.velocity = min(127, step.velocity + 1)
             elif self.phrase_field == 2:  # Probability
                 step.probability = min(100, step.probability + 10)
-        elif key == ord('-') or key == ord('_'):
+            elif self.phrase_field == 3:
+                idx = self.condition_options.index(step.condition)
+                step.condition = self.condition_options[(idx + 1) % len(self.condition_options)]
+        elif key == curses.KEY_SLEFT:
             if self.phrase_field == 0:  # Note
-                if step.note is not None:
-                    step.note = max(0, step.note - 1)
+                step.note = max(0, (step.note or 60) - 1)
             elif self.phrase_field == 1:  # Velocity
                 step.velocity = max(0, step.velocity - 1)
             elif self.phrase_field == 2:  # Probability
                 step.probability = max(0, step.probability - 10)
-        elif key == ord('\t'):  # Tab for condition
-            if self.phrase_field == 3:
+            elif self.phrase_field == 3:
                 idx = self.condition_options.index(step.condition)
-                step.condition = self.condition_options[(idx + 1) % len(self.condition_options)]
+                step.condition = self.condition_options[(idx - 1) % len(self.condition_options)]
         elif key == curses.KEY_BACKSPACE or key == 127:
             if self.phrase_field == 0:
                 step.note = None
         elif key == ord('\n'):
             if self.phrase_field == 0:  # Note
                 step.note = 60
-        elif ord('0') <= key <= ord('9'):
-            # Number input for direct value entry
-            digit = key - ord('0')
-            if self.phrase_field == 0:  # Note
-                step.note = digit if step.note is None else min(127, step.note * 10 + digit)
-            elif self.phrase_field == 1:  # Velocity
-                step.velocity = min(127, int(str(step.velocity)[-2:] + str(digit)))
-            elif self.phrase_field == 2:  # Probability
-                step.probability = min(100, int(str(step.probability)[-2:] + str(digit)))
         elif key == 27:  # ESC
             self.view = "arrangement"
     
@@ -377,7 +582,8 @@ class MidiTracker:
         
         curses.curs_set(0)
         stdscr.nodelay(1)
-        stdscr.timeout(50)
+        stdscr.nodelay(True)
+        stdscr.timeout(20)
         
         while True:
             if self.view == "arrangement":
@@ -452,6 +658,10 @@ class MidiTracker:
                     if self.playback_thread:
                         self.playback_thread.join(timeout=1.0)
                 break
+            elif key == 27:  # ESC key
+                selected_port = self.select_midi_port(stdscr)
+                if selected_port:
+                    self.change_midi_port(stdscr, selected_port)
 
 def main():
     tracker = MidiTracker()
