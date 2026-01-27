@@ -97,11 +97,13 @@ class MidiTracker:
         return count % denom == num - 1
     
     def send_midi(self, channel, note, velocity):
-        if self.midi_out:
+        # Use the selected MIDI output (self.output if available, otherwise self.midi_out)
+        midi_output = getattr(self, 'output', None) or self.midi_out
+        if midi_output:
             try:
-                self.midi_out.send(Message('note_on', channel=channel, note=note, velocity=velocity))
+                midi_output.send(Message('note_on', channel=channel, note=note, velocity=velocity))
                 # Schedule note off after 50ms
-                threading.Timer(0.05, lambda: self.midi_out.send(
+                threading.Timer(0.05, lambda: midi_output.send(
                     Message('note_off', channel=channel, note=note)
                 )).start()
             except:
@@ -359,9 +361,15 @@ class MidiTracker:
                 for ch in range(16):
                     self.output.send(mido.Message('control_change', control=123, value=0, channel=ch))
                 self.output.close()
+            elif self.midi_out:
+                # Also close the default midi_out if it exists
+                for ch in range(16):
+                    self.midi_out.send(mido.Message('control_change', control=123, value=0, channel=ch))
+                self.midi_out.close()
         
-            # Open new port
+            # Open new port and assign to both variables for consistency
             self.output = mido.open_output(new_port_name)
+            self.midi_out = self.output  # Keep both in sync
         
             # Reset current notes tracking
             # self.current_notes = [None] * 8
