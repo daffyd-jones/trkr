@@ -8,7 +8,9 @@ import curses
 import threading
 import time
 import random
-from dataclasses import dataclass, field
+import json
+import os
+from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Dict
 import mido
 from mido import Message
@@ -73,6 +75,79 @@ class MidiTracker:
             "1/7", "2/7", "3/7", "4/7", "5/7", "6/7", "7/7", "1/8", "2/8", "3/8", "4/8",
             "5/8", "6/8", "7/8", "8/8"
         ]
+
+    def save_arrangement(self, filename):
+        """Save the current arrangement, phrases, and settings to a JSON file."""
+        save_data = {
+            'version': '1.0',
+            'tempo': self.tempo,
+            'play_mode': self.play_mode,
+            'current_phrase_num': self.current_phrase_num,
+            'arrangement': self.arrangement,
+            'phrases': {},
+            'condition_options': self.condition_options
+        }
+        
+        # Convert phrases to serializable format
+        for phrase_num, phrase in self.phrases.items():
+            save_data['phrases'][str(phrase_num)] = {
+                'steps': [asdict(step) for step in phrase.steps]
+            }
+        
+        try:
+            with open(filename, 'w') as f:
+                json.dump(save_data, f, indent=2)
+            return True
+        except Exception as e:
+            return False
+    
+    def load_arrangement(self, filename):
+        """Load arrangement, phrases, and settings from a JSON file."""
+        try:
+            with open(filename, 'r') as f:
+                save_data = json.load(f)
+            
+            # Load basic settings
+            self.tempo = save_data.get('tempo', 120)
+            self.play_mode = save_data.get('play_mode', 'pattern')
+            self.current_phrase_num = save_data.get('current_phrase_num', 0)
+            
+            # Load arrangement
+            self.arrangement = save_data.get('arrangement', [[None for _ in range(8)] for _ in range(64)])
+            
+            # Load phrases
+            phrases_data = save_data.get('phrases', {})
+            for phrase_num_str, phrase_data in phrases_data.items():
+                phrase_num = int(phrase_num_str)
+                steps_data = phrase_data.get('steps', [])
+                
+                # Create Phrase object with loaded steps
+                steps = []
+                for step_data in steps_data:
+                    step = PhraseStep(
+                        note=step_data.get('note'),
+                        velocity=step_data.get('velocity', 100),
+                        probability=step_data.get('probability', 100),
+                        condition=step_data.get('condition', '1/1')
+                    )
+                    steps.append(step)
+                
+                # Ensure we have exactly 16 steps
+                while len(steps) < 16:
+                    steps.append(PhraseStep())
+                self.phrases[phrase_num] = Phrase(steps=steps[:16])
+            
+            return True
+        except Exception as e:
+            return False
+    
+    def get_save_files(self):
+        """Get list of existing save files in current directory."""
+        save_files = []
+        for file in os.listdir('.'):
+            if file.endswith('.trkr'):
+                save_files.append(file)
+        return sorted(save_files)
 
     def get_current_note(self, channel):
         """Get the current note name for a channel."""
@@ -264,8 +339,297 @@ class MidiTracker:
         
     #     stdscr.refresh()
 
+    def show_main_menu(self, stdscr):
+        """Show the main ESC menu with submenus."""
+        menu_options = ["Save/Load", "MIDI Settings", "Resume"]
+        selected_idx = 0
+        
+        while True:
+            height, width = stdscr.getmaxyx()
+            stdscr.clear()
+            
+            # Header
+            stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+            stdscr.addstr(1, 2, " MAIN MENU ", curses.A_BOLD | curses.color_pair(1))
+            stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+            
+            # Menu options
+            for i, option in enumerate(menu_options):
+                y = 5 + i
+                if i == selected_idx:
+                    attr = curses.A_REVERSE | curses.A_BOLD
+                    prefix = "► "
+                else:
+                    attr = 0
+                    prefix = "  "
+                stdscr.addstr(y, 4, f"{prefix}{option}", attr)
+            
+            # Footer
+            footer_y = height - 3
+            stdscr.addstr(footer_y, 0, "─" * (width - 1))
+            stdscr.addstr(footer_y + 1, 2, "↑/↓: Navigate | ENTER: Select | ESC: Resume", curses.color_pair(5))
+            
+            stdscr.refresh()
+            
+            # Handle input
+            key = stdscr.getch()
+            
+            if key == curses.KEY_UP:
+                selected_idx = (selected_idx - 1) % len(menu_options)
+            elif key == curses.KEY_DOWN:
+                selected_idx = (selected_idx + 1) % len(menu_options)
+            elif key == ord('\n'):  # Enter
+                if selected_idx == 0:  # Save/Load
+                    result = self.show_saveload_menu(stdscr)
+                    if result == "quit":
+                        return "quit"
+                elif selected_idx == 1:  # MIDI Settings
+                    self.show_midi_menu(stdscr)
+                elif selected_idx == 2:  # Resume
+                    break
+            elif key == 27:  # ESC
+                break
+        
+        return "resume"
+    
+    def show_saveload_menu(self, stdscr):
+        """Show save/load submenu."""
+        menu_options = ["Save Arrangement", "Load Arrangement", "Back"]
+        selected_idx = 0
+        
+        while True:
+            height, width = stdscr.getmaxyx()
+            stdscr.clear()
+            
+            # Header
+            stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+            stdscr.addstr(1, 2, " SAVE/LOAD ", curses.A_BOLD | curses.color_pair(1))
+            stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+            
+            # Menu options
+            for i, option in enumerate(menu_options):
+                y = 5 + i
+                if i == selected_idx:
+                    attr = curses.A_REVERSE | curses.A_BOLD
+                    prefix = "► "
+                else:
+                    attr = 0
+                    prefix = "  "
+                stdscr.addstr(y, 4, f"{prefix}{option}", attr)
+            
+            # Footer
+            footer_y = height - 3
+            stdscr.addstr(footer_y, 0, "─" * (width - 1))
+            stdscr.addstr(footer_y + 1, 2, "↑/↓: Navigate | ENTER: Select | ESC: Back", curses.color_pair(5))
+            
+            stdscr.refresh()
+            
+            # Handle input
+            key = stdscr.getch()
+            
+            if key == curses.KEY_UP:
+                selected_idx = (selected_idx - 1) % len(menu_options)
+            elif key == curses.KEY_DOWN:
+                selected_idx = (selected_idx + 1) % len(menu_options)
+            elif key == ord('\n'):  # Enter
+                if selected_idx == 0:  # Save
+                    self.show_save_dialog(stdscr)
+                elif selected_idx == 1:  # Load
+                    result = self.show_load_dialog(stdscr)
+                    if result == "quit":
+                        return "quit"
+                elif selected_idx == 2:  # Back
+                    break
+            elif key == 27:  # ESC
+                break
+        
+        return "resume"
+    
+    def show_save_dialog(self, stdscr):
+        """Show save file dialog."""
+        save_files = self.get_save_files()
+        
+        # Add "New File..." option at the top
+        options = ["New File..."] + save_files + ["Cancel"]
+        selected_idx = 0
+        filename_input = ""
+        input_mode = False
+        
+        while True:
+            height, width = stdscr.getmaxyx()
+            stdscr.clear()
+            
+            # Header
+            stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+            stdscr.addstr(1, 2, " SAVE ARRANGEMENT ", curses.A_BOLD | curses.color_pair(1))
+            stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+            
+            if input_mode:
+                stdscr.addstr(4, 2, "Enter filename (.trkr will be added):", curses.A_BOLD)
+                stdscr.addstr(5, 2, filename_input + "_", curses.A_REVERSE)
+                stdscr.addstr(7, 2, "ENTER: Save | ESC: Cancel", curses.color_pair(5))
+            else:
+                stdscr.addstr(4, 2, "Select save slot:", curses.A_BOLD)
+                
+                # Show options
+                for i, option in enumerate(options):
+                    y = 6 + i
+                    if y >= height - 4:
+                        break
+                    
+                    if i == selected_idx:
+                        attr = curses.A_REVERSE | curses.A_BOLD
+                        prefix = "► "
+                    else:
+                        attr = 0
+                        prefix = "  "
+                    
+                    display_name = option
+                    if len(display_name) > width - 15:
+                        display_name = display_name[:width-18] + "..."
+                    
+                    stdscr.addstr(y, 4, f"{prefix}{display_name}", attr)
+                
+                # Footer
+                footer_y = height - 3
+                stdscr.addstr(footer_y, 0, "─" * (width - 1))
+                stdscr.addstr(footer_y + 1, 2, "↑/↓: Navigate | ENTER: Select | ESC: Cancel", curses.color_pair(5))
+            
+            stdscr.refresh()
+            
+            # Handle input
+            key = stdscr.getch()
+            
+            if input_mode:
+                if key == 27:  # ESC
+                    input_mode = False
+                    filename_input = ""
+                elif key == ord('\n'):  # Enter
+                    if filename_input:
+                        if not filename_input.endswith('.trkr'):
+                            filename_input += '.trkr'
+                        if self.save_arrangement(filename_input):
+                            # Show success message briefly
+                            self.show_message(stdscr, f"Saved to {filename_input}", 2)
+                            break
+                        else:
+                            self.show_message(stdscr, "Failed to save!", 2)
+                            input_mode = False
+                            filename_input = ""
+                elif key == curses.KEY_BACKSPACE or key == 127:
+                    filename_input = filename_input[:-1]
+                elif 32 <= key <= 126:  # Printable characters
+                    if len(filename_input) < 20:
+                        filename_input += chr(key)
+            else:
+                if key == curses.KEY_UP:
+                    selected_idx = (selected_idx - 1) % len(options)
+                elif key == curses.KEY_DOWN:
+                    selected_idx = (selected_idx + 1) % len(options)
+                elif key == ord('\n'):  # Enter
+                    if selected_idx == 0:  # New File
+                        input_mode = True
+                        filename_input = ""
+                    elif selected_idx == len(options) - 1:  # Cancel
+                        break
+                    else:  # Existing file
+                        filename = save_files[selected_idx - 1]
+                        if self.save_arrangement(filename):
+                            self.show_message(stdscr, f"Saved to {filename}", 2)
+                            break
+                        else:
+                            self.show_message(stdscr, "Failed to save!", 2)
+                elif key == 27:  # ESC
+                    break
+    
+    def show_load_dialog(self, stdscr):
+        """Show load file dialog."""
+        save_files = self.get_save_files()
+        
+        if not save_files:
+            self.show_message(stdscr, "No save files found!", 2)
+            return "resume"
+        
+        options = save_files + ["Cancel"]
+        selected_idx = 0
+        
+        while True:
+            height, width = stdscr.getmaxyx()
+            stdscr.clear()
+            
+            # Header
+            stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+            stdscr.addstr(1, 2, " LOAD ARRANGEMENT ", curses.A_BOLD | curses.color_pair(1))
+            stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+            
+            stdscr.addstr(4, 2, "Select file to load:", curses.A_BOLD)
+            
+            # Show options
+            for i, option in enumerate(options):
+                y = 6 + i
+                if y >= height - 4:
+                    break
+                
+                if i == selected_idx:
+                    attr = curses.A_REVERSE | curses.A_BOLD
+                    prefix = "► "
+                else:
+                    attr = 0
+                    prefix = "  "
+                
+                display_name = option
+                if len(display_name) > width - 15:
+                    display_name = display_name[:width-18] + "..."
+                
+                stdscr.addstr(y, 4, f"{prefix}{display_name}", attr)
+            
+            # Footer
+            footer_y = height - 3
+            stdscr.addstr(footer_y, 0, "─" * (width - 1))
+            stdscr.addstr(footer_y + 1, 2, "↑/↓: Navigate | ENTER: Load | ESC: Cancel", curses.color_pair(5))
+            
+            stdscr.refresh()
+            
+            # Handle input
+            key = stdscr.getch()
+            
+            if key == curses.KEY_UP:
+                selected_idx = (selected_idx - 1) % len(options)
+            elif key == curses.KEY_DOWN:
+                selected_idx = (selected_idx + 1) % len(options)
+            elif key == ord('\n'):  # Enter
+                if selected_idx == len(options) - 1:  # Cancel
+                    break
+                else:  # Load file
+                    filename = save_files[selected_idx]
+                    if self.load_arrangement(filename):
+                        self.show_message(stdscr, f"Loaded {filename}", 2)
+                        return "quit"  # Signal to restart the interface
+                    else:
+                        self.show_message(stdscr, "Failed to load!", 2)
+            elif key == 27:  # ESC
+                break
+        
+        return "resume"
+    
+    def show_midi_menu(self, stdscr):
+        """Show MIDI settings submenu."""
+        selected_port = self.select_midi_port(stdscr)
+        if selected_port:
+            self.change_midi_port(stdscr, selected_port)
+    
+    def show_message(self, stdscr, message, duration=2):
+        """Show a temporary message."""
+        height, width = stdscr.getmaxyx()
+        stdscr.clear()
+        stdscr.addstr(0, 0, "═" * (width - 1), curses.A_BOLD)
+        stdscr.addstr(1, 2, " MESSAGE ", curses.A_BOLD | curses.color_pair(1))
+        stdscr.addstr(2, 0, "═" * (width - 1), curses.A_BOLD)
+        stdscr.addstr(height//2, (width - len(message))//2, message, curses.A_BOLD)
+        stdscr.refresh()
+        time.sleep(duration)
+
     def select_midi_port(self, stdscr):
-        """Display a menu to select MIDI output port."""
         import mido
     
         # Get available MIDI output ports
@@ -667,9 +1031,13 @@ class MidiTracker:
                         self.playback_thread.join(timeout=1.0)
                 break
             elif key == 27:  # ESC key
-                selected_port = self.select_midi_port(stdscr)
-                if selected_port:
-                    self.change_midi_port(stdscr, selected_port)
+                result = self.show_main_menu(stdscr)
+                if result == "quit":
+                    if self.playing:
+                        self.stop_playback_func()
+                        if self.playback_thread:
+                            self.playback_thread.join(timeout=1.0)
+                    break
 
 def main():
     tracker = MidiTracker()
