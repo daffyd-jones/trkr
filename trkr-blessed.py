@@ -145,6 +145,35 @@ class TRKR:
             return True
         return False
 
+    def _is_shift_up(self, key):
+        """Detect Shift+Up across terminals, with + as fallback."""
+        if key.name == "KEY_SR":  # Shift+Up in many terminals
+            return True
+        if key.code is not None and key.code == getattr(
+            self.term, "KEY_SR", -1
+        ):
+            return True
+        if str(key) == "\x1b[1;2A":  # xterm raw sequence
+            return True
+        if str(key) == "+":  # fallback key
+            return True
+        return False
+
+    def _is_shift_down(self, key):
+        """Detect Shift+Down across terminals, with - as fallback."""
+        if key.name == "KEY_SF":  # Shift+Down in many terminals
+            return True
+        if key.code is not None and key.code == getattr(
+            self.term, "KEY_SF", -1
+        ):
+            return True
+        if str(key) == "\x1b[1;2B":  # xterm raw sequence
+            return True
+        if str(key) == "-":  # fallback key
+            return True
+        return False
+
+    
     def _set_phrase_length(self, phrase, new_length):
         """Extend or shrink a phrase. New pages are copies of page 1."""
         old_length = phrase.length
@@ -400,7 +429,7 @@ class TRKR:
             ch1, ch2 = pair * 2, pair * 2 + 1
             n1 = f"{midi_to_note(self.current_notes[ch1]):<4}"
             n2 = f"{midi_to_note(self.current_notes[ch2]):<4}"
-            buf.append(t.move_xy(notes_x, 5 + pair) + f"{n1}|{n2}")
+            buf.append(t.move_xy(notes_x, 5 + pair) + f"{n1}| {n2}")
 
         # ── footer ──
         footer_y = h - 5
@@ -804,6 +833,12 @@ class TRKR:
                 step.condition = self.condition_options[
                     (idx - 1) % len(self.condition_options)
                 ]
+        elif self._is_shift_up(key):
+            if self.phrase_field == 0:
+                step.note = min(127, (step.note or 60) + 12)  # +1 octave
+        elif self._is_shift_down(key):
+            if self.phrase_field == 0:
+                step.note = max(0, (step.note or 60) - 12)
         elif self._is_backspace(key):
             if self.phrase_field == 0:
                 step.note = None
