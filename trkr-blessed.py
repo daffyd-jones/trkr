@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 import random
+import json
+import os
 from dataclasses import dataclass, field
 from typing import Optional, List
 import mido
@@ -60,7 +62,7 @@ class TRKR:
         self.phrase_cursor = 0
         self.phrase_field = 0  # 0=note, 1=vel, 2=prob, 3=cond
         self.phrase_page = 0
-        self.phrase_header_field = 0  # 0=length, 1=page
+        self.phrase_header_field = 0  # 0=length, 1=page, 2=offset
         self.length_options = [16, 32, 48, 64]
         self.bar_tick = 0
         self.playing = False
@@ -88,6 +90,361 @@ class TRKR:
             "1/7", "2/7", "3/7", "4/7", "5/7", "6/7", "7/7",
             "1/8", "2/8", "3/8", "4/8", "5/8", "6/8", "7/8", "8/8",
         ]
+
+    # ── save/load functionality ────────────────────────────────
+
+    def save_project(self, filename):
+        """Save the current project to a JSON file."""
+        project_data = {
+            "tempo": self.tempo,
+            "arrangement": self.arrangement,
+            "phrases": {}
+        }
+        
+        # Convert phrases to serializable format
+        for phrase_num, phrase in self.phrases.items():
+            project_data["phrases"][str(phrase_num)] = {
+                "length": phrase.length,
+                "steps": [
+                    {
+                        "note": step.note,
+                        "velocity": step.velocity,
+                        "probability": step.probability,
+                        "condition": step.condition
+                    }
+                    for step in phrase.steps
+                ]
+            }
+        
+        try:
+            with open(filename, 'w') as f:
+                json.dump(project_data, f, indent=2)
+            return True
+        except Exception as e:
+            return False
+
+    def load_project(self, filename):
+        """Load a project from a JSON file."""
+        try:
+            with open(filename, 'r') as f:
+                project_data = json.load(f)
+            
+            # Load tempo
+            self.tempo = project_data.get("tempo", 120)
+            
+            # Load arrangement
+            self.arrangement = project_data.get("arrangement", [[None for _ in range(8)] for _ in range(64)])
+            
+            # Load phrases
+            phrases_data = project_data.get("phrases", {})
+            for phrase_str, phrase_data in phrases_data.items():
+                phrase_num = int(phrase_str)
+                phrase = Phrase(length=phrase_data.get("length", 16))
+                phrase.steps = []
+                
+                for step_data in phrase_data.get("steps", []):
+                    step = PhraseStep(
+                        note=step_data.get("note"),
+                        velocity=step_data.get("velocity", 100),
+                        probability=step_data.get("probability", 100),
+                        condition=step_data.get("condition", "1/1")
+                    )
+                    phrase.steps.append(step)
+                
+                self.phrases[phrase_num] = phrase
+            
+            return True
+        except Exception as e:
+            return False
+
+    def file_browser(self, mode="save"):
+        """File browser for saving or loading projects."""
+        t = self.term
+        current_dir = os.getcwd()
+        selected_idx = 0
+        filename_input = ""
+        input_mode = False
+        
+        while True:
+            h, w = t.height, t.width
+            buf = self._clear_screen()
+            
+            # Header
+            buf.append(t.move_xy(0, 0) + t.bold("═" * (w - 1)))
+            title = f" {mode.upper()} PROJECT " if mode == "save" else " LOAD PROJECT "
+            buf.append(t.move_xy(2, 1) + t.bold_cyan(title))
+            buf.append(t.move_xy(0, 2) + t.bold("═" * (w - 1)))
+            
+            # Current directory
+            buf.append(t.move_xy(2, 4) + t.bold(f"Directory: {current_dir}"))
+            buf.append(t.move_xy(0, 5) + "─" * (w - 1))
+            
+            # Get files and directories
+            try:
+                items = []
+                if current_dir != "/":
+                    items.append(("..", "directory"))
+                
+                for item in sorted(os.listdir(current_dir)):
+                    item_path = os.path.join(current_dir, item)
+                    if os.path.isdir(item_path):
+                        items.append((item, "directory"))
+                    elif item.endswith('.json'):
+                        items.append((item, "file"))
+                
+                # Display items
+                for i, (name, item_type) in enumerate(items):
+                    y = 7 + i
+                    if y >= h - 8:
+                        break
+                    
+                    max_len = w - 10
+                    display = name if len(name) <= max_len else name[:max_len-3] + "..."
+                    
+                    if i == selected_idx and not input_mode:
+                        prefix = "► " if item_type == "directory" else "► "
+                        buf.append(t.move_xy(4, y) + t.bold_reverse(f"{prefix}{display}"))
+                    else:
+                        prefix = "📁 " if item_type == "directory" else "📄 "
+                        buf.append(t.move_xy(4, y) + f"{prefix}{display}")
+                
+                # Filename input for save mode
+                if mode == "save":
+                    input_y = min(h - 8, 7 + len(items))
+                    buf.append(t.move_xy(0, input_y) + "─" * (w - 1))
+                    buf.append(t.move_xy(2, input_y + 1) + t.bold("Filename: "))
+                    if input_mode:
+                        buf.append(t.move_xy(12, input_y + 1) + t.reverse(filename_input + "_"))
+                    else:
+                        buf.append(t.move_xy(12, input_y + 1) + filename_input)
+                
+            except Exception:
+                buf.append(t.move_xy(2, 7) + t.red("Error reading directory"))
+            
+            # Footer
+            footer_y = h - 5
+            buf.append(t.move_xy(0, footer_y) + "─" * (w - 1))
+            
+            if mode == "save":
+                controls = [
+                    "↑/↓: Navigate | ENTER: Select/Save | TAB: Edit Filename | ESC: Cancel",
+                    "TAB: Edit filename when not in input mode"
+                ]
+            else:
+                controls = [
+                    "↑/↓: Navigate | ENTER: Select | ESC: Cancel"
+                ]
+            
+            for i, ctrl in enumerate(controls):
+                buf.append(t.move_xy(2, footer_y + 1 + i) + t.magenta(ctrl))
+            
+            self._flush(buf)
+            
+            key = t.inkey(timeout=None)
+            
+            if input_mode:
+                if key.name == "KEY_ENTER" or key in ("\n", "\r"):
+                    if filename_input.strip():
+                        return os.path.join(current_dir, filename_input if filename_input.endswith('.json') else filename_input + '.json')
+                elif key.name == "KEY_ESCAPE":
+                    input_mode = False
+                elif self._is_backspace(key):
+                    filename_input = filename_input[:-1]
+                elif len(str(key)) == 1 and len(filename_input) < 50:
+                    filename_input += str(key)
+            else:
+                if key.name == "KEY_UP":
+                    selected_idx = max(0, selected_idx - 1)
+                elif key.name == "KEY_DOWN":
+                    selected_idx = min(len(items) - 1, selected_idx + 1)
+                elif key.name == "KEY_ENTER" or key in ("\n", "\r"):
+                    if selected_idx < len(items):
+                        name, item_type = items[selected_idx]
+                        if item_type == "directory":
+                            if name == "..":
+                                current_dir = os.path.dirname(current_dir)
+                            else:
+                                current_dir = os.path.join(current_dir, name)
+                            selected_idx = 0
+                        elif mode == "load":
+                            return os.path.join(current_dir, name)
+                elif key.name == "KEY_TAB" and mode == "save":
+                    input_mode = True
+                elif key.name == "KEY_ESCAPE":
+                    return None
+
+    def offset_phrase(self, phrase_num, offset):
+        """Offset a phrase by the specified amount (positive = forward, negative = backward)."""
+        if phrase_num not in self.phrases:
+            return
+        
+        phrase = self.phrases[phrase_num]
+        if len(phrase.steps) <= 1:
+            return
+        
+        # Normalize offset to phrase length
+        offset = offset % len(phrase.steps)
+        if offset == 0:
+            return
+        
+        # Perform the cyclic shift
+        steps = phrase.steps
+        if offset > 0:
+            # Shift forward: move steps from end to beginning
+            phrase.steps = steps[-offset:] + steps[:-offset]
+        else:
+            # Shift backward: move steps from beginning to end
+            offset = abs(offset)
+            phrase.steps = steps[offset:] + steps[:offset]
+
+    def esc_menu(self):
+        """Main ESC menu with MIDI and save/load submenus."""
+        t = self.term
+        current_menu = "main"  # "main", "midi", "save_load"
+        selected_idx = 0
+        
+        while True:
+            h, w = t.height, t.width
+            buf = self._clear_screen()
+            
+            # Header
+            buf.append(t.move_xy(0, 0) + t.bold("═" * (w - 1)))
+            buf.append(t.move_xy(2, 1) + t.bold_cyan(" MENU "))
+            buf.append(t.move_xy(0, 2) + t.bold("═" * (w - 1)))
+            
+            if current_menu == "main":
+                menu_items = [
+                    "MIDI Settings",
+                    "Save/Load Project",
+                    "Back to Tracker"
+                ]
+                
+                buf.append(t.move_xy(2, 4) + t.bold("Main Menu:"))
+                buf.append(t.move_xy(0, 5) + "─" * (w - 1))
+                
+                for i, item in enumerate(menu_items):
+                    y = 7 + i
+                    if i == selected_idx:
+                        buf.append(t.move_xy(4, y) + t.bold_reverse(f"► {item}"))
+                    else:
+                        buf.append(t.move_xy(4, y) + f"  {item}")
+                
+                controls = "↑/↓: Navigate | ENTER: Select | ESC: Back to Tracker"
+                
+            elif current_menu == "midi":
+                menu_items = [
+                    "Select MIDI Port",
+                    "Back to Main Menu"
+                ]
+                
+                buf.append(t.move_xy(2, 4) + t.bold("MIDI Settings:"))
+                buf.append(t.move_xy(0, 5) + "─" * (w - 1))
+                
+                # Show current MIDI port
+                current_port = self.midi_out.name if self.midi_out else "None"
+                buf.append(t.move_xy(4, 7) + f"Current Port: {t.cyan(current_port)}")
+                buf.append(t.move_xy(0, 8) + "─" * (w - 1))
+                
+                for i, item in enumerate(menu_items):
+                    y = 10 + i
+                    if i == selected_idx:
+                        buf.append(t.move_xy(4, y) + t.bold_reverse(f"► {item}"))
+                    else:
+                        buf.append(t.move_xy(4, y) + f"  {item}")
+                
+                controls = "↑/↓: Navigate | ENTER: Select | ESC: Back to Main Menu"
+                
+            elif current_menu == "save_load":
+                menu_items = [
+                    "Save Project",
+                    "Load Project",
+                    "Back to Main Menu"
+                ]
+                
+                buf.append(t.move_xy(2, 4) + t.bold("Save/Load Project:"))
+                buf.append(t.move_xy(0, 5) + "─" * (w - 1))
+                
+                for i, item in enumerate(menu_items):
+                    y = 7 + i
+                    if i == selected_idx:
+                        buf.append(t.move_xy(4, y) + t.bold_reverse(f"► {item}"))
+                    else:
+                        buf.append(t.move_xy(4, y) + f"  {item}")
+                
+                controls = "↑/↓: Navigate | ENTER: Select | ESC: Back to Main Menu"
+            
+            # Footer
+            footer_y = h - 3
+            buf.append(t.move_xy(0, footer_y) + "─" * (w - 1))
+            buf.append(t.move_xy(2, footer_y + 1) + t.magenta(controls))
+            
+            self._flush(buf)
+            
+            key = t.inkey(timeout=None)
+            
+            if key.name == "KEY_UP":
+                selected_idx = max(0, selected_idx - 1)
+            elif key.name == "KEY_DOWN":
+                if current_menu == "main":
+                    selected_idx = min(2, selected_idx + 1)
+                elif current_menu == "midi":
+                    selected_idx = min(1, selected_idx + 1)
+                elif current_menu == "save_load":
+                    selected_idx = min(2, selected_idx + 1)
+            elif key.name == "KEY_ENTER" or key in ("\n", "\r"):
+                if current_menu == "main":
+                    if selected_idx == 0:  # MIDI Settings
+                        current_menu = "midi"
+                        selected_idx = 0
+                    elif selected_idx == 1:  # Save/Load
+                        current_menu = "save_load"
+                        selected_idx = 0
+                    elif selected_idx == 2:  # Back to Tracker
+                        return
+                elif current_menu == "midi":
+                    if selected_idx == 0:  # Select MIDI Port
+                        selected_port = self.select_midi_port()
+                        if selected_port:
+                            self.change_midi_port(selected_port)
+                    elif selected_idx == 1:  # Back to Main
+                        current_menu = "main"
+                        selected_idx = 0
+                elif current_menu == "save_load":
+                    if selected_idx == 0:  # Save Project
+                        filename = self.file_browser("save")
+                        if filename:
+                            if self.save_project(filename):
+                                # Show success message briefly
+                                buf = self._clear_screen()
+                                buf.append(t.move_xy(0, 0) + t.bold("═" * (w - 1)))
+                                buf.append(t.move_xy(2, 1) + t.bold_green("SUCCESS"))
+                                buf.append(t.move_xy(0, 2) + t.bold("═" * (w - 1)))
+                                buf.append(t.move_xy(2, 5) + t.green(f"Project saved to: {filename}"))
+                                buf.append(t.move_xy(2, 7) + "Press any key to continue...")
+                                self._flush(buf)
+                                t.inkey(timeout=None)
+                    elif selected_idx == 1:  # Load Project
+                        filename = self.file_browser("load")
+                        if filename:
+                            if self.load_project(filename):
+                                # Show success message briefly
+                                buf = self._clear_screen()
+                                buf.append(t.move_xy(0, 0) + t.bold("═" * (w - 1)))
+                                buf.append(t.move_xy(2, 1) + t.bold_green("SUCCESS"))
+                                buf.append(t.move_xy(0, 2) + t.bold("═" * (w - 1)))
+                                buf.append(t.move_xy(2, 5) + t.green(f"Project loaded from: {filename}"))
+                                buf.append(t.move_xy(2, 7) + "Press any key to continue...")
+                                self._flush(buf)
+                                t.inkey(timeout=None)
+                    elif selected_idx == 2:  # Back to Main
+                        current_menu = "main"
+                        selected_idx = 1
+            elif key.name == "KEY_ESCAPE":
+                if current_menu == "main":
+                    return
+                else:
+                    current_menu = "main"
+                    selected_idx = 0
 
     # ── helpers ───────────────────────────────────────────────
 
@@ -505,6 +862,23 @@ class TRKR:
                 + page_val
             )
 
+        # Offset selector
+        offset_x = 48
+        offset_label = "OFFSET:"
+        offset_val = "  0"
+        if self.phrase_cursor == -1 and self.phrase_header_field == 2:
+            buf.append(
+                t.move_xy(offset_x, 1)
+                + t.bold(offset_label)
+                + t.reverse(offset_val)
+            )
+        else:
+            buf.append(
+                t.move_xy(offset_x, 1)
+                + t.bold(offset_label)
+                + offset_val
+            )
+
         buf.append(t.move_xy(0, 2) + t.bold("═" * (w - 1)))
 
         # Column headers
@@ -583,7 +957,7 @@ class TRKR:
         buf.append(t.move_xy(0, h - 4) + "─" * (w - 1))
         controls = [
             "↑↓:Navigate Steps | ←→:Navigate Fields "
-            "| SHIFT+←→ or []:Adjust Value",
+            "| SHIFT+←→:Adjust Value | SHIFT+←→ in OFFSET:Shift phrase",
             "BACKSPACE:Clear Note | ESC:Back to Arrangement",
         ]
         for i, ctrl in enumerate(controls):
@@ -760,7 +1134,7 @@ class TRKR:
                 )
             elif key.name == "KEY_RIGHT":
                 self.phrase_header_field = min(
-                    1, self.phrase_header_field + 1
+                    2, self.phrase_header_field + 1
                 )
             elif self._is_shift_right(key):
                 if self.phrase_header_field == 0:  # Length
@@ -772,6 +1146,8 @@ class TRKR:
                     new_max = phrase.length // 16
                     if self.phrase_page < new_max - 1:
                         self.phrase_page += 1
+                elif self.phrase_header_field == 2:  # Offset
+                    self.offset_phrase(self.current_phrase_num, 1)
             elif self._is_shift_left(key):
                 if self.phrase_header_field == 0:  # Length
                     idx = self.length_options.index(phrase.length)
@@ -785,6 +1161,8 @@ class TRKR:
                 elif self.phrase_header_field == 1:  # Page
                     if self.phrase_page > 0:
                         self.phrase_page -= 1
+                elif self.phrase_header_field == 2:  # Offset
+                    self.offset_phrase(self.current_phrase_num, -1)
             elif key.name == "KEY_ESCAPE":
                 self.view = "arrangement"
             return
@@ -947,9 +1325,7 @@ class TRKR:
                     break
 
                 elif key.name == "KEY_ESCAPE":
-                    selected_port = self.select_midi_port()
-                    if selected_port:
-                        self.change_midi_port(selected_port)
+                    self.esc_menu()
 
 
 def main():
