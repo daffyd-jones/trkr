@@ -376,11 +376,11 @@ class SynthEngine:
         elif voice_type == VoiceType.TR808_HIHAT_OPEN:
             drum = self._synth_noise_drum(int(self.sample_rate * 0.6), 9000, 0.25)
         elif voice_type == VoiceType.TR808_TOM_LOW:
-            drum = self._synth_tonal_drum(length, 80, 8.0)
+            drum = self._synth_tonal_drum(length, 120, 8.0)
         elif voice_type == VoiceType.TR808_TOM_MID:
-            drum = self._synth_tonal_drum(length, 110, 4.0)
+            drum = self._synth_tonal_drum(length, 240, 4.0)
         elif voice_type == VoiceType.TR808_TOM_HI:
-            drum = self._synth_tonal_drum(length, 155, 4.0)
+            drum = self._synth_tonal_drum(length, 360, 4.0)
         elif voice_type == VoiceType.TR808_CYMBAL:
             drum = self._synth_noise_drum(length, 10000, 0.15)
         elif voice_type == VoiceType.TR808_COWBELL:
@@ -408,7 +408,7 @@ class SynthEngine:
         elif voice_type == VoiceType.TR707_HIHAT:
             drum = self._synth_noise_drum(int(self.sample_rate * 0.06), 9500, 0.3)
         elif voice_type == VoiceType.TR707_TOM:
-            drum = self._synth_tonal_drum(length, 90, 4.0)
+            drum = self._synth_tonal_drum(length, 110, 4.0)
             
         elif voice_type == VoiceType.LINN_KICK:
             drum = self._synth_kick(length, start_freq=160, end_freq=42, nonlinearity=1.3)
@@ -568,40 +568,35 @@ class SynthEngine:
     
     def _synth_808_snare(self, length):
         """808 snare: tone + noise combination"""
-        # Tonal component - lower pitched
+        # Tonal component - reduced nonlinearity to avoid resonance
         tone_len = int(length * 0.35)
         t = np.arange(tone_len) / self.sample_rate
         
-        # Lower frequencies for warmth
-        tone = (np.sin(2 * np.pi * 150 * t) + 0.7 * np.sin(2 * np.pi * 280 * t))
+        # Two sine waves for body
+        tone = (np.sin(2 * np.pi * 180 * t) + 0.7 * np.sin(2 * np.pi * 330 * t))
         tone_env = np.exp(-t * 18)
         tone = tone * tone_env
         
-        # Very gentle saturation
-        tone = np.tanh(tone * 0.8)
+        # Gentle saturation
+        tone = np.tanh(tone * 1.5)
         
-        # Noise component - use highpass instead of bandpass to avoid resonance
+        # Noise component - wider bandwidth, less resonant
         noise_len = int(length * 0.35)
         noise = np.random.randn(noise_len)
         
-        # Simple highpass filter - no resonant peak
-        b, a = signal.butter(1, 1200 / (self.sample_rate / 2), btype='high')
+        # Wider bandpass filter for less resonance
+        b, a = signal.butter(2, [1500 / (self.sample_rate / 2), 5000 / (self.sample_rate / 2)], btype='band')
         filtered = signal.lfilter(b, a, noise)
         
         noise_env = np.exp(-np.arange(noise_len) / self.sample_rate * 12)
         filtered = filtered * noise_env
         
-        # Impact transient (short high-freq click)
-        impact_len = int(self.sample_rate * 0.002)  # 2ms
-        impact = np.random.randn(impact_len) * np.exp(-np.arange(impact_len) / self.sample_rate * 500)
-        
-        # Combine (40% tone, 55% noise, 5% impact)
+        # Combine (40% tone, 60% noise)
         min_len = min(len(tone), len(filtered))
         combined = np.zeros(length, dtype=np.float32)
-        combined[:min_len] = 0.4 * tone[:min_len] + 0.55 * filtered[:min_len]
-        combined[:len(impact)] += 0.05 * impact
+        combined[:min_len] = 0.4 * tone[:min_len] + 0.6 * filtered[:min_len]
         
-        # Normalize
+        # Normalize to medium level
         max_val = np.max(np.abs(combined))
         if max_val > 0:
             combined = combined / max_val * 0.5
@@ -610,79 +605,69 @@ class SynthEngine:
     
     def _synth_909_snare(self, length):
         """909 snare: sharper than 808"""
-        # Tonal component - lower pitched
+        # Tonal component - crisp but not overly resonant
         tone_len = int(length * 0.3)
         t = np.arange(tone_len) / self.sample_rate
         
-        # Lower frequencies
-        tone = (np.sin(2 * np.pi * 165 * t) + 0.8 * np.sin(2 * np.pi * 300 * t))
+        # Two sine waves
+        tone = (np.sin(2 * np.pi * 200 * t) + 0.8 * np.sin(2 * np.pi * 350 * t))
         tone_env = np.exp(-t * 22)
         tone = tone * tone_env
         
-        # Light saturation
-        tone = np.tanh(tone * 1.0)
+        # Moderate saturation
+        tone = np.tanh(tone * 2.0)
         
-        # Noise component - highpass for crisp character without resonance
+        # Noise component - brighter, crisper
         noise_len = int(length * 0.3)
         noise = np.random.randn(noise_len)
         
-        # Simple highpass
-        b, a = signal.butter(1, 1500 / (self.sample_rate / 2), btype='high')
+        # Brighter bandpass
+        b, a = signal.butter(2, [2000 / (self.sample_rate / 2), 6000 / (self.sample_rate / 2)], btype='band')
         filtered = signal.lfilter(b, a, noise)
         
         noise_env = np.exp(-np.arange(noise_len) / self.sample_rate * 15)
         filtered = filtered * noise_env
         
-        # Impact transient (short, bright click)
-        impact_len = int(self.sample_rate * 0.0015)  # 1.5ms
-        impact = np.random.randn(impact_len) * np.exp(-np.arange(impact_len) / self.sample_rate * 600)
-        
-        # Combine (35% tone, 57% noise, 8% impact)
+        # Combine (35% tone, 65% noise)
         min_len = min(len(tone), len(filtered))
         combined = np.zeros(length, dtype=np.float32)
-        combined[:min_len] = 0.35 * tone[:min_len] + 0.57 * filtered[:min_len]
-        combined[:len(impact)] += 0.08 * impact
+        combined[:min_len] = 0.35 * tone[:min_len] + 0.65 * filtered[:min_len]
         
         # Normalize
         max_val = np.max(np.abs(combined))
         if max_val > 0:
-            combined = combined / max_val * 0.52
+            combined = combined / max_val * 0.5
         
         return combined
     
     def _synth_707_snare(self, length):
         """707 snare: more electronic"""
-        # Tonal component - lower pitched
+        # Tonal component
         tone_len = int(length * 0.25)
         t = np.arange(tone_len) / self.sample_rate
         
-        tone = np.sin(2 * np.pi * 180 * t)
+        tone = np.sin(2 * np.pi * 220 * t)
         tone_env = np.exp(-t * 20)
         tone = tone * tone_env
         
-        # Very light saturation
-        tone = np.tanh(tone * 0.6)
+        # Light saturation
+        tone = np.tanh(tone * 1.2)
         
-        # Noise component - simple highpass
+        # Noise component
         noise_len = int(length * 0.25)
         noise = np.random.randn(noise_len)
         
-        # Simple highpass, no resonance
-        b, a = signal.butter(1, 1000 / (self.sample_rate / 2), btype='high')
+        # Mid-range bandpass
+        b, a = signal.butter(2, [1200 / (self.sample_rate / 2), 4500 / (self.sample_rate / 2)], btype='band')
         filtered = signal.lfilter(b, a, noise)
         
         noise_env = np.exp(-np.arange(noise_len) / self.sample_rate * 18)
         filtered = filtered * noise_env
         
-        # Impact transient
-        impact_len = int(self.sample_rate * 0.002)
-        impact = np.random.randn(impact_len) * np.exp(-np.arange(impact_len) / self.sample_rate * 500)
-        
-        # Combine (30% tone, 64% noise, 6% impact)
+        # Combine (30% tone, 70% noise)
         min_len = min(len(tone), len(filtered))
         combined = np.zeros(length, dtype=np.float32)
-        combined[:min_len] = 0.3 * tone[:min_len] + 0.64 * filtered[:min_len]
-        combined[:len(impact)] += 0.06 * impact
+        combined[:min_len] = 0.3 * tone[:min_len] + 0.7 * filtered[:min_len]
         
         # Normalize
         max_val = np.max(np.abs(combined))
@@ -693,38 +678,33 @@ class SynthEngine:
     
     def _synth_linn_snare(self, length):
         """Linn snare: bright and crisp"""
-        # Tonal component - lower pitched
+        # Tonal component
         tone_len = int(length * 0.32)
         t = np.arange(tone_len) / self.sample_rate
         
-        # Lower frequencies for warmth
-        tone = (np.sin(2 * np.pi * 190 * t) + 0.7 * np.sin(2 * np.pi * 320 * t))
+        # Two sine waves for fullness
+        tone = (np.sin(2 * np.pi * 240 * t) + 0.7 * np.sin(2 * np.pi * 380 * t))
         tone_env = np.exp(-t * 20)
         tone = tone * tone_env
         
-        # Light saturation
-        tone = np.tanh(tone * 0.9)
+        # Moderate saturation
+        tone = np.tanh(tone * 1.8)
         
-        # Noise component - highpass for brightness without resonance
+        # Noise component
         noise_len = int(length * 0.32)
         noise = np.random.randn(noise_len)
         
-        # Simple highpass
-        b, a = signal.butter(1, 1300 / (self.sample_rate / 2), btype='high')
+        # Bright but not too narrow
+        b, a = signal.butter(2, [1800 / (self.sample_rate / 2), 5500 / (self.sample_rate / 2)], btype='band')
         filtered = signal.lfilter(b, a, noise)
         
         noise_env = np.exp(-np.arange(noise_len) / self.sample_rate * 14)
         filtered = filtered * noise_env
         
-        # Impact transient
-        impact_len = int(self.sample_rate * 0.0018)
-        impact = np.random.randn(impact_len) * np.exp(-np.arange(impact_len) / self.sample_rate * 550)
-        
-        # Combine (35% tone, 58% noise, 7% impact)
+        # Combine (35% tone, 65% noise)
         min_len = min(len(tone), len(filtered))
         combined = np.zeros(length, dtype=np.float32)
-        combined[:min_len] = 0.35 * tone[:min_len] + 0.58 * filtered[:min_len]
-        combined[:len(impact)] += 0.07 * impact
+        combined[:min_len] = 0.35 * tone[:min_len] + 0.65 * filtered[:min_len]
         
         # Normalize
         max_val = np.max(np.abs(combined))
