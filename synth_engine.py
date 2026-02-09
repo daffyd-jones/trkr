@@ -6,6 +6,10 @@ Based on classic drum synthesis techniques:
 - Tone + noise combinations
 - FM synthesis for metallic sounds
 - ADSR envelope control for expression
+
+FIXED VERSION:
+- Proper phase continuity to eliminate clicks
+- Filter state tracking for smooth filtering
 """
 
 import numpy as np
@@ -79,6 +83,15 @@ class Filter:
 
 
 @dataclass
+class DrumFilter:
+    """Drum-specific post-generation filter parameters"""
+    enabled: bool = False
+    cutoff: float = 8000.0  # Hz
+    resonance: float = 1.0  # Q factor
+    filter_type: str = "lowpass"  # lowpass, highpass, bandpass
+
+
+@dataclass
 class ChannelVoice:
     """Voice configuration for a channel"""
     voice_type: VoiceType = VoiceType.SINE
@@ -87,6 +100,14 @@ class ChannelVoice:
     volume: float = 0.8  # 0.0 to 1.0
     pan: float = 0.5  # 0.0 (left) to 1.0 (right)
     detune: float = 0.0  # cents
+    
+    # Drum-specific parameters
+    drum_length_multiplier: float = 1.0  # 0.1 to 2.0, for shortening kick/snare hits
+    drum_release_envelope: float = 1.0  # 0.0 to 2.0, release multiplier for drums
+    drum_filter: DrumFilter = field(default_factory=DrumFilter)
+    
+    # Filter state for continuity between buffers
+    filter_state: float = 0.0
     
 
 class SynthEngine:
@@ -191,7 +212,7 @@ class SynthEngine:
         
         # For drums, pre-render the entire sample
         if self._is_drum_voice(voice.voice_type):
-            drum_sample = self._render_drum_sample(voice.voice_type, note, velocity, voice.adsr)
+            drum_sample = self._render_drum_sample(voice.voice_type, note, velocity, voice.adsr, voice)
             note_data = {
                 'note': note,
                 'velocity': velocity,
@@ -203,7 +224,7 @@ class SynthEngine:
             note_data = {
                 'note': note,
                 'velocity': velocity,
-                'phase': 0.0,
+                'phase': 0.0,  # This will track phase in radians (0 to 2π)
                 'envelope_phase': 0.0,
                 'state': 'attack',
                 'release_time': None,
@@ -264,8 +285,9 @@ class SynthEngine:
                 envelope = self._generate_envelope(note_data, frames, voice.adsr)
                 signal *= envelope
                 
-                # Apply filter
-                signal = self._apply_filter(signal, voice.filter)
+                # Apply filter with state tracking
+                signal, new_filter_state = self._apply_filter(signal, voice.filter, voice.filter_state)
+                voice.filter_state = new_filter_state
                 
                 # Apply velocity
                 signal *= note_data['velocity']
@@ -280,8 +302,7 @@ class SynthEngine:
                 output[:, 0] += signal * left_gain
                 output[:, 1] += signal * right_gain
                 
-                # Update phase
-                note_data['phase'] += frames
+                # Update envelope phase
                 note_data['envelope_phase'] += frames / self.sample_rate
                 
                 # Remove finished notes
@@ -299,26 +320,35 @@ class SynthEngine:
         
     def _generate_oscillator(self, voice_type: VoiceType, note_data: Dict, 
                             frames: int, detune: float) -> np.ndarray:
-        """Generate oscillator waveform for synth voices"""
+        """Generate oscillator waveform for synth voices with proper phase continuity"""
         # Calculate frequency with detune
         freq = 440.0 * (2.0 ** ((note_data['note'] - 69) / 12.0))
         freq *= (2.0 ** (detune / 1200.0))
         
-        # Generate time array
-        t = (np.arange(frames) + note_data['phase']) / self.sample_rate
-        phase = 2.0 * np.pi * freq * t
+        # Phase increment per sample
+        phase_inc = 2.0 * np.pi * freq / self.sample_rate
+        
+        # Generate phase array starting from current phase
+        phases = note_data['phase'] + np.arange(frames) * phase_inc
+        
+        # Update stored phase with wrap-around to prevent overflow
+        note_data['phase'] = (note_data['phase'] + frames * phase_inc) % (2.0 * np.pi)
         
         if voice_type == VoiceType.SINE:
-            return np.sin(phase).astype(np.float32)
+            return np.sin(phases).astype(np.float32)
             
         elif voice_type == VoiceType.SQUARE:
-            return np.sign(np.sin(phase)).astype(np.float32)
+            return np.sign(np.sin(phases)).astype(np.float32)
             
         elif voice_type == VoiceType.SAW:
-            return (2.0 * (phase / (2.0 * np.pi) % 1.0) - 1.0).astype(np.float32)
+            # Sawtooth: normalize phase to -1 to 1
+            normalized_phase = (phases / np.pi) % 2.0 - 1.0
+            return normalized_phase.astype(np.float32)
             
         elif voice_type == VoiceType.TRIANGLE:
-            return (2.0 * np.abs(2.0 * (phase / (2.0 * np.pi) % 1.0) - 1.0) - 1.0).astype(np.float32)
+            # Triangle: fold the sawtooth
+            normalized_phase = (phases / np.pi) % 2.0 - 1.0
+            return (2.0 * np.abs(normalized_phase) - 1.0).astype(np.float32)
             
         elif voice_type == VoiceType.NOISE:
             return (np.random.uniform(-1.0, 1.0, frames)).astype(np.float32)
@@ -348,21 +378,27 @@ class SynthEngine:
     # DRUM SAMPLE RENDERING (inspired by reference materials)
     # ──────────────────────────────────────────────────────────────────
     
-    def _render_drum_sample(self, voice_type: VoiceType, note: int, velocity: float, adsr: ADSR) -> np.ndarray:
+    def _render_drum_sample(self, voice_type: VoiceType, note: int, velocity: float, adsr: ADSR, voice: ChannelVoice) -> np.ndarray:
         """Render a complete drum sample with ADSR envelope applied"""
-        # Determine sample length based on drum type
+        # Determine base sample length based on drum type
         if 'KICK' in voice_type.value or 'TOM' in voice_type.value:
-            length = int(self.sample_rate * 0.8)
+            base_length = int(self.sample_rate * 0.8)
         elif 'SNARE' in voice_type.value or 'CLAP' in voice_type.value:
-            length = int(self.sample_rate * 0.4)
+            base_length = int(self.sample_rate * 0.4)
         elif 'HIHAT' in voice_type.value and 'CLOSED' in voice_type.value:
-            length = int(self.sample_rate * 0.15)
+            base_length = int(self.sample_rate * 0.15)
         elif 'HIHAT' in voice_type.value and 'OPEN' in voice_type.value:
-            length = int(self.sample_rate * 0.6)
+            base_length = int(self.sample_rate * 0.6)
         elif 'CYMBAL' in voice_type.value or 'CRASH' in voice_type.value or 'RIDE' in voice_type.value:
-            length = int(self.sample_rate * 1.5)
+            base_length = int(self.sample_rate * 1.5)
         else:
-            length = int(self.sample_rate * 0.5)
+            base_length = int(self.sample_rate * 0.5)
+        
+        # Apply drum length multiplier for kick and snare shortening
+        if 'KICK' in voice_type.value or 'SNARE' in voice_type.value:
+            length = int(base_length * voice.drum_length_multiplier)
+        else:
+            length = base_length
         
         # Generate raw drum sound
         if voice_type == VoiceType.TR808_KICK:
@@ -431,31 +467,74 @@ class SynthEngine:
             drum = np.zeros(length, dtype=np.float32)
         
         # Apply ADSR envelope for expression
-        drum = self._apply_adsr_to_drum(drum, velocity, adsr)
+        drum = self._apply_adsr_to_drum(drum, velocity, adsr, voice)
         
         return drum
     
-    def _apply_adsr_to_drum(self, drum: np.ndarray, velocity: float, adsr: ADSR) -> np.ndarray:
+    def _apply_adsr_to_drum(self, drum: np.ndarray, velocity: float, adsr: ADSR, voice: ChannelVoice) -> np.ndarray:
         """Apply ADSR envelope to drum sample for expression control"""
         length = len(drum)
         envelope = np.ones(length, dtype=np.float32)
         
         attack_samples = int(adsr.attack * self.sample_rate)
-        release_samples = int(adsr.release * self.sample_rate)
+        release_samples = int(adsr.release * self.sample_rate * voice.drum_release_envelope)
         
         # Attack phase
         if attack_samples > 0 and attack_samples < length:
             envelope[:attack_samples] = np.linspace(0, 1, attack_samples)
         
-        # Release phase (from end)
+        # Release phase (from end) - use drum release envelope multiplier
         if release_samples > 0 and release_samples < length:
             release_start = length - release_samples
             envelope[release_start:] = np.linspace(1, 0, release_samples)
         
-        # Apply velocity
+        # Apply velocity and envelope
         drum = drum * envelope * velocity
         
+        # Apply post-generation drum filter if enabled
+        if voice.drum_filter.enabled:
+            drum = self._apply_drum_filter(drum, voice.drum_filter)
+        
         return drum
+    
+    def _apply_drum_filter(self, drum: np.ndarray, drum_filter: DrumFilter) -> np.ndarray:
+        """Apply post-generation filter to drum samples"""
+        if not drum_filter.enabled:
+            return drum
+            
+        nyquist = self.sample_rate / 2
+        cutoff_norm = drum_filter.cutoff / nyquist
+        
+        # Ensure cutoff is within valid range
+        cutoff_norm = np.clip(cutoff_norm, 0.01, 0.99)
+        
+        try:
+            if drum_filter.filter_type == "lowpass":
+                b, a = signal.butter(2, cutoff_norm, btype='low')
+            elif drum_filter.filter_type == "highpass":
+                b, a = signal.butter(2, cutoff_norm, btype='high')
+            elif drum_filter.filter_type == "bandpass":
+                # For bandpass, create a band around the cutoff frequency
+                low = max(0.01, cutoff_norm * 0.5)
+                high = min(0.99, cutoff_norm * 1.5)
+                b, a = signal.butter(2, [low, high], btype='band')
+            else:
+                return drum
+                
+            # Apply filter with resonance
+            filtered = signal.lfilter(b, a, drum)
+            
+            # Apply resonance boost if needed (simplified approach)
+            if drum_filter.resonance > 1.0:
+                # Add some resonance by mixing in a small amount of the filtered signal
+                resonance_amount = min(0.3, (drum_filter.resonance - 1.0) * 0.1)
+                filtered = filtered * (1.0 + resonance_amount)
+                
+            return filtered
+            
+        except Exception:
+            # If filtering fails, return original drum
+            return drum
     
     # ──────────────────────────────────────────────────────────────────
     # CORE DRUM SYNTHESIS FUNCTIONS (based on references)
@@ -906,23 +985,33 @@ class SynthEngine:
                     
         return envelope
         
-    def _apply_filter(self, signal_in: np.ndarray, filter_params: Filter) -> np.ndarray:
-        """Apply simple lowpass filter"""
+    def _apply_filter(self, signal_in: np.ndarray, filter_params: Filter, 
+                     prev_state: float) -> tuple[np.ndarray, float]:
+        """Apply simple lowpass filter with state continuity
+        
+        Returns:
+            tuple: (filtered_signal, new_filter_state)
+        """
         if filter_params.cutoff >= self.sample_rate / 2:
-            return signal_in
+            return signal_in, signal_in[-1] if len(signal_in) > 0 else 0.0
             
-        # One-pole lowpass
+        # One-pole lowpass with state tracking
         rc = 1.0 / (2.0 * np.pi * filter_params.cutoff)
         dt = 1.0 / self.sample_rate
         alpha = dt / (rc + dt)
         
         filtered = np.zeros_like(signal_in)
-        filtered[0] = signal_in[0]
+        
+        # Initialize with previous state for continuity
+        filtered[0] = prev_state + alpha * (signal_in[0] - prev_state)
         
         for i in range(1, len(signal_in)):
             filtered[i] = filtered[i-1] + alpha * (signal_in[i] - filtered[i-1])
-            
-        return filtered
+        
+        # Return filtered signal and final state for next buffer
+        final_state = filtered[-1] if len(filtered) > 0 else prev_state
+        
+        return filtered, final_state
 
 
 def get_voice_categories():

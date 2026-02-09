@@ -12,6 +12,7 @@ import random
 import json
 import os
 import argparse
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional, List
 import mido
@@ -93,7 +94,7 @@ class TRKR:
         # Synth engine
         self.use_synth = use_synth and SYNTH_AVAILABLE
         self.synth_engine = None
-        self.synth_view_mode = "channels"  # channels, voice, adsr, filter
+        self.synth_view_mode = "channels"  # channels, voice, adsr, filter, drums
         self.synth_cursor_channel = 0
         self.synth_cursor_param = 0
         self.synth_voice_category = 0
@@ -150,6 +151,14 @@ class TRKR:
                         "cutoff": ch.filter.cutoff,
                         "resonance": ch.filter.resonance,
                         "filter_type": ch.filter.filter_type,
+                    },
+                    "drum_length_multiplier": ch.drum_length_multiplier,
+                    "drum_release_envelope": ch.drum_release_envelope,
+                    "drum_filter": {
+                        "enabled": ch.drum_filter.enabled,
+                        "cutoff": ch.drum_filter.cutoff,
+                        "resonance": ch.drum_filter.resonance,
+                        "filter_type": ch.drum_filter.filter_type,
                     }
                 })
         
@@ -212,6 +221,16 @@ class TRKR:
                         ch.filter.cutoff = filter_data.get("cutoff", 8000.0)
                         ch.filter.resonance = filter_data.get("resonance", 1.0)
                         ch.filter.filter_type = filter_data.get("filter_type", "lowpass")
+                        
+                        # Load drum-specific parameters
+                        ch.drum_length_multiplier = ch_data.get("drum_length_multiplier", 1.0)
+                        ch.drum_release_envelope = ch_data.get("drum_release_envelope", 1.0)
+                        
+                        drum_filter_data = ch_data.get("drum_filter", {})
+                        ch.drum_filter.enabled = drum_filter_data.get("enabled", False)
+                        ch.drum_filter.cutoff = drum_filter_data.get("cutoff", 8000.0)
+                        ch.drum_filter.resonance = drum_filter_data.get("resonance", 1.0)
+                        ch.drum_filter.filter_type = drum_filter_data.get("filter_type", "lowpass")
             
             # Load phrases
             phrases_data = project_data.get("phrases", {})
@@ -1175,6 +1194,8 @@ class TRKR:
             self._draw_synth_adsr(buf, t, h, w)
         elif self.synth_view_mode == "filter":
             self._draw_synth_filter(buf, t, h, w)
+        elif self.synth_view_mode == "drums":
+            self._draw_synth_drums(buf, t, h, w)
         
         self._flush(buf)
     
@@ -1215,7 +1236,7 @@ class TRKR:
         footer_y = h - 5
         buf.append(t.move_xy(0, footer_y) + "─" * (w - 1))
         controls = [
-            "↑/↓: Select Channel | V: Voice Select | A: ADSR | F: Filter",
+            "↑/↓: Select Channel | V: Voice Select | A: ADSR | F: Filter | D: Drums",
             "SHIFT+←/→: Adjust Volume | [/]: Adjust Pan | +/-: Adjust Detune",
             "G+SHIFT+←/→: Global Volume | ESC: Back to Arrangement"
         ]
@@ -1339,6 +1360,64 @@ class TRKR:
         for i, ctrl in enumerate(controls):
             buf.append(t.move_xy(2, footer_y + 1 + i) + t.magenta(ctrl))
     
+    def _draw_synth_drums(self, buf, t, h, w):
+        """Draw drum-specific controls editor"""
+        voice = self.synth_engine.channels[self.synth_cursor_channel]
+        
+        buf.append(t.move_xy(2, 4) + t.bold(f"Channel {self.synth_cursor_channel + 1} - Drum Controls"))
+        buf.append(t.move_xy(0, 5) + "─" * (w - 1))
+        
+        # Check if current voice is a drum
+        is_drum = self.synth_engine._is_drum_voice(voice.voice_type)
+        
+        if not is_drum:
+            buf.append(t.move_xy(4, 7) + t.yellow("Drum controls only available for drum voices"))
+            buf.append(t.move_xy(4, 9) + t.dim(f"Current voice: {voice.voice_type.value}"))
+        else:
+            params = [
+                ("Length Mult", f"{voice.drum_length_multiplier:.2f}", "0.1-2.0"),
+                ("Release Env", f"{voice.drum_release_envelope:.2f}", "0.0-2.0"),
+                ("Drum Filter", "ON" if voice.drum_filter.enabled else "OFF", "toggle"),
+                ("Filter Cutoff", f"{voice.drum_filter.cutoff:.0f} Hz", "20-20000"),
+                ("Filter Res", f"{voice.drum_filter.resonance:.2f}", "0.1-10.0"),
+                ("Filter Type", voice.drum_filter.filter_type, "low/high/band"),
+            ]
+            
+            for i, (name, value, range_info) in enumerate(params):
+                y = 7 + i * 2
+                
+                if i == 2:  # Filter enabled toggle
+                    param_text = f"{name:12s}: {value:>3s} ({range_info})"
+                else:
+                    param_text = f"{name:12s}: {value:>8s} ({range_info})"
+                
+                if i == self.synth_cursor_param:
+                    buf.append(t.move_xy(4, y) + t.bold_reverse(param_text))
+                    # Draw bar for numeric parameters
+                    if i in [0, 1, 3, 4]:  # Numeric parameters
+                        if i == 0:  # Length multiplier
+                            bar_width = min(40, int((voice.drum_length_multiplier - 0.1) / 1.9 * 40))
+                        elif i == 1:  # Release envelope
+                            bar_width = min(40, int(voice.drum_release_envelope / 2.0 * 40))
+                        elif i == 3:  # Filter cutoff (log scale approximation)
+                            normalized = (np.log10(max(20, voice.drum_filter.cutoff)) - np.log10(20)) / (np.log10(20000) - np.log10(20))
+                            bar_width = min(40, int(normalized * 40))
+                        elif i == 4:  # Filter resonance
+                            bar_width = min(40, int((voice.drum_filter.resonance - 0.1) / 9.9 * 40))
+                        buf.append(t.move_xy(45, y) + t.green("█" * bar_width))
+                else:
+                    buf.append(t.move_xy(4, y) + param_text)
+        
+        # Footer
+        footer_y = h - 5
+        buf.append(t.move_xy(0, footer_y) + "─" * (w - 1))
+        controls = [
+            "↑/↓: Navigate Parameters | SHIFT+←/→: Adjust Value | ENTER: Toggle Filter",
+            "ESC: Back to Channels"
+        ]
+        for i, ctrl in enumerate(controls):
+            buf.append(t.move_xy(2, footer_y + 1 + i) + t.magenta(ctrl))
+    
     def handle_synth_input(self, key):
         """Handle synth engine input"""
         if self.synth_view_mode == "channels":
@@ -1354,6 +1433,9 @@ class TRKR:
                 self.synth_cursor_param = 0
             elif key in ("f", "F"):
                 self.synth_view_mode = "filter"
+                self.synth_cursor_param = 0
+            elif key in ("d", "D"):
+                self.synth_view_mode = "drums"
                 self.synth_cursor_param = 0
             elif self._is_shift_left(key):
                 if key in ("g", "G"):  # Global volume
@@ -1457,6 +1539,51 @@ class TRKR:
                     types = ["lowpass", "highpass", "bandpass"]
                     idx = types.index(voice.filter.filter_type)
                     voice.filter.filter_type = types[(idx + 1) % len(types)]
+            elif key.name == "KEY_ESCAPE":
+                self.synth_view_mode = "channels"
+                
+        elif self.synth_view_mode == "drums":
+            voice = self.synth_engine.channels[self.synth_cursor_channel]
+            is_drum = self.synth_engine._is_drum_voice(voice.voice_type)
+            
+            if not is_drum:
+                if key.name == "KEY_ESCAPE":
+                    self.synth_view_mode = "channels"
+                return
+            
+            if key.name == "KEY_UP":
+                self.synth_cursor_param = max(0, self.synth_cursor_param - 1)
+            elif key.name == "KEY_DOWN":
+                self.synth_cursor_param = min(5, self.synth_cursor_param + 1)
+            elif key.name == "KEY_ENTER" or key in ("\n", "\r"):
+                if self.synth_cursor_param == 2:  # Filter enabled toggle
+                    voice.drum_filter.enabled = not voice.drum_filter.enabled
+            elif self._is_shift_left(key):
+                if self.synth_cursor_param == 0:  # Length multiplier
+                    voice.drum_length_multiplier = max(0.1, voice.drum_length_multiplier - 0.05)
+                elif self.synth_cursor_param == 1:  # Release envelope
+                    voice.drum_release_envelope = max(0.0, voice.drum_release_envelope - 0.05)
+                elif self.synth_cursor_param == 3:  # Filter cutoff
+                    voice.drum_filter.cutoff = max(20.0, voice.drum_filter.cutoff - 100)
+                elif self.synth_cursor_param == 4:  # Filter resonance
+                    voice.drum_filter.resonance = max(0.1, voice.drum_filter.resonance - 0.1)
+                elif self.synth_cursor_param == 5:  # Filter type
+                    types = ["lowpass", "highpass", "bandpass"]
+                    idx = types.index(voice.drum_filter.filter_type)
+                    voice.drum_filter.filter_type = types[(idx - 1) % len(types)]
+            elif self._is_shift_right(key):
+                if self.synth_cursor_param == 0:  # Length multiplier
+                    voice.drum_length_multiplier = min(2.0, voice.drum_length_multiplier + 0.05)
+                elif self.synth_cursor_param == 1:  # Release envelope
+                    voice.drum_release_envelope = min(2.0, voice.drum_release_envelope + 0.05)
+                elif self.synth_cursor_param == 3:  # Filter cutoff
+                    voice.drum_filter.cutoff = min(20000.0, voice.drum_filter.cutoff + 100)
+                elif self.synth_cursor_param == 4:  # Filter resonance
+                    voice.drum_filter.resonance = min(10.0, voice.drum_filter.resonance + 0.1)
+                elif self.synth_cursor_param == 5:  # Filter type
+                    types = ["lowpass", "highpass", "bandpass"]
+                    idx = types.index(voice.drum_filter.filter_type)
+                    voice.drum_filter.filter_type = types[(idx + 1) % len(types)]
             elif key.name == "KEY_ESCAPE":
                 self.synth_view_mode = "channels"
 
