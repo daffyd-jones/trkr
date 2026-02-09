@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-Terminal MIDI Phrase Tracker with Synth Engine
-Requirements: pip install mido python-rtmidi blessed numpy sounddevice scipy
-Usage: python tracker_synth.py --synth (to enable synth on startup)
+TRKR MIDI TRACKER
+
 """
 
 import sys
@@ -94,9 +93,10 @@ class TRKR:
         # Synth engine
         self.use_synth = use_synth and SYNTH_AVAILABLE
         self.synth_engine = None
-        self.synth_view_mode = "channels"  # channels, voice, adsr, filter, drums
+        self.synth_view_mode = "channels"  # channels, voice, adsr, filter, drums, effects
         self.synth_cursor_channel = 0
         self.synth_cursor_param = 0
+        self.synth_effect_param_idx = 0  # For individual effect parameters
         self.synth_voice_category = 0
         self.synth_voice_index = 0
         
@@ -133,7 +133,8 @@ class TRKR:
         if self.use_synth and self.synth_engine:
             project_data["synth"] = {
                 "global_volume": self.synth_engine.global_volume,
-                "channels": []
+                "channels": [],
+                "effects_buses": {}
             }
             for ch in self.synth_engine.channels:
                 project_data["synth"]["channels"].append({
@@ -159,8 +160,56 @@ class TRKR:
                         "cutoff": ch.drum_filter.cutoff,
                         "resonance": ch.drum_filter.resonance,
                         "filter_type": ch.drum_filter.filter_type,
+                    },
+                    "effects_sends": {
+                        "chorus": ch.send_chorus,
+                        "delay": ch.send_delay,
+                        "reverb": ch.send_reverb,
+                        "compression": ch.send_compression,
+                        "crush": ch.send_crush,
                     }
                 })
+            
+            # Save effects bus parameters
+            for effect_type, bus in self.synth_engine.effects_buses.items():
+                effect_data = {
+                    "enabled": bus.params.enabled,
+                    "wet_mix": bus.params.wet_mix
+                }
+                
+                if effect_type.name == "CHORUS":
+                    effect_data.update({
+                        "rate": bus.params.rate,
+                        "depth": bus.params.depth,
+                        "feedback": bus.params.feedback
+                    })
+                elif effect_type.name == "DELAY":
+                    effect_data.update({
+                        "time": bus.params.time,
+                        "feedback": bus.params.feedback,
+                        "cross_feedback": bus.params.cross_feedback
+                    })
+                elif effect_type.name == "REVERB":
+                    effect_data.update({
+                        "room_size": bus.params.room_size,
+                        "damping": bus.params.damping,
+                        "width": bus.params.width
+                    })
+                elif effect_type.name == "COMPRESSION":
+                    effect_data.update({
+                        "threshold": bus.params.threshold,
+                        "ratio": bus.params.ratio,
+                        "attack": bus.params.attack,
+                        "release": bus.params.release,
+                        "makeup_gain": bus.params.makeup_gain
+                    })
+                elif effect_type.name == "CRUSH":
+                    effect_data.update({
+                        "bits": bus.params.bits,
+                        "downsample": bus.params.downsample
+                    })
+                
+                project_data["synth"]["effects_buses"][effect_type.name] = effect_data
         
         # Convert phrases to serializable format
         for phrase_num, phrase in self.phrases.items():
@@ -231,6 +280,62 @@ class TRKR:
                         ch.drum_filter.cutoff = drum_filter_data.get("cutoff", 8000.0)
                         ch.drum_filter.resonance = drum_filter_data.get("resonance", 1.0)
                         ch.drum_filter.filter_type = drum_filter_data.get("filter_type", "lowpass")
+                        
+                        # Load effects sends
+                        effects_sends_data = ch_data.get("effects_sends", {})
+                        ch.send_chorus = effects_sends_data.get("chorus", 0.0)
+                        ch.send_delay = effects_sends_data.get("delay", 0.0)
+                        ch.send_reverb = effects_sends_data.get("reverb", 0.0)
+                        ch.send_compression = effects_sends_data.get("compression", 0.0)
+                        ch.send_crush = effects_sends_data.get("crush", 0.0)
+            
+            # Load effects bus parameters
+            if "effects_buses" in synth_data:
+                for effect_name, effect_data in synth_data["effects_buses"].items():
+                    if effect_name in [et.name for et in self.synth_engine.effects_buses.keys()]:
+                        effect_type = getattr(self.synth_engine, 'EffectType.' + effect_name)
+                        if effect_type in self.synth_engine.effects_buses:
+                            bus = self.synth_engine.effects_buses[effect_type]
+                            bus.params.enabled = effect_data.get("enabled", False)
+                            bus.params.wet_mix = effect_data.get("wet_mix", 0.5)
+                            
+                            if effect_name == "CHORUS":
+                                if hasattr(bus.params, 'rate'):
+                                    bus.params.rate = effect_data.get("rate", 1.5)
+                                if hasattr(bus.params, 'depth'):
+                                    bus.params.depth = effect_data.get("depth", 0.02)
+                                if hasattr(bus.params, 'feedback'):
+                                    bus.params.feedback = effect_data.get("feedback", 0.1)
+                            elif effect_name == "DELAY":
+                                if hasattr(bus.params, 'time'):
+                                    bus.params.time = effect_data.get("time", 0.3)
+                                if hasattr(bus.params, 'feedback'):
+                                    bus.params.feedback = effect_data.get("feedback", 0.4)
+                                if hasattr(bus.params, 'cross_feedback'):
+                                    bus.params.cross_feedback = effect_data.get("cross_feedback", 0.0)
+                            elif effect_name == "REVERB":
+                                if hasattr(bus.params, 'room_size'):
+                                    bus.params.room_size = effect_data.get("room_size", 0.5)
+                                if hasattr(bus.params, 'damping'):
+                                    bus.params.damping = effect_data.get("damping", 0.5)
+                                if hasattr(bus.params, 'width'):
+                                    bus.params.width = effect_data.get("width", 1.0)
+                            elif effect_name == "COMPRESSION":
+                                if hasattr(bus.params, 'threshold'):
+                                    bus.params.threshold = effect_data.get("threshold", -20.0)
+                                if hasattr(bus.params, 'ratio'):
+                                    bus.params.ratio = effect_data.get("ratio", 4.0)
+                                if hasattr(bus.params, 'attack'):
+                                    bus.params.attack = effect_data.get("attack", 0.005)
+                                if hasattr(bus.params, 'release'):
+                                    bus.params.release = effect_data.get("release", 0.1)
+                                if hasattr(bus.params, 'makeup_gain'):
+                                    bus.params.makeup_gain = effect_data.get("makeup_gain", 0.0)
+                            elif effect_name == "CRUSH":
+                                if hasattr(bus.params, 'bits'):
+                                    bus.params.bits = effect_data.get("bits", 8)
+                                if hasattr(bus.params, 'downsample'):
+                                    bus.params.downsample = effect_data.get("downsample", 1)
             
             # Load phrases
             phrases_data = project_data.get("phrases", {})
@@ -1196,6 +1301,8 @@ class TRKR:
             self._draw_synth_filter(buf, t, h, w)
         elif self.synth_view_mode == "drums":
             self._draw_synth_drums(buf, t, h, w)
+        elif self.synth_view_mode == "effects":
+            self._draw_synth_effects(buf, t, h, w)
         
         self._flush(buf)
     
@@ -1236,7 +1343,7 @@ class TRKR:
         footer_y = h - 5
         buf.append(t.move_xy(0, footer_y) + "─" * (w - 1))
         controls = [
-            "↑/↓: Select Channel | V: Voice Select | A: ADSR | F: Filter | D: Drums",
+            "↑/↓: Select Channel | V: Voice Select | A: ADSR | F: Filter | D: Drums | E: Effects",
             "SHIFT+←/→: Adjust Volume | [/]: Adjust Pan | +/-: Adjust Detune",
             "G+SHIFT+←/→: Global Volume | ESC: Back to Arrangement"
         ]
@@ -1418,6 +1525,119 @@ class TRKR:
         for i, ctrl in enumerate(controls):
             buf.append(t.move_xy(2, footer_y + 1 + i) + t.magenta(ctrl))
     
+    def _draw_synth_effects(self, buf, t, h, w):
+        """Draw effects sends and parameters editor"""
+        voice = self.synth_engine.channels[self.synth_cursor_channel]
+        
+        buf.append(t.move_xy(2, 4) + t.bold(f"Channel {self.synth_cursor_channel + 1} - Effects Sends"))
+        buf.append(t.move_xy(0, 5) + "─" * (w - 1))
+        
+        # Effect sends
+        sends = [
+            ("Chorus", voice.send_chorus, "0.0-1.0"),
+            ("Delay", voice.send_delay, "0.0-1.0"),
+            ("Reverb", voice.send_reverb, "0.0-1.0"),
+            ("Compression", voice.send_compression, "0.0-1.0"),
+            ("Crush", voice.send_crush, "0.0-1.0"),
+        ]
+        
+        for i, (name, value, range_info) in enumerate(sends):
+            y = 7 + i * 2
+            param_text = f"{name:12s}: {value:.2f} ({range_info})"
+            
+            if i == self.synth_cursor_param:
+                buf.append(t.move_xy(4, y) + t.bold_reverse(param_text))
+                # Draw bar
+                bar_width = min(40, int(value * 40))
+                buf.append(t.move_xy(45, y) + t.green("█" * bar_width))
+            else:
+                buf.append(t.move_xy(4, y) + param_text)
+        
+        # Effect parameters section
+        buf.append(t.move_xy(0, 18) + "─" * (w - 1))
+        buf.append(t.move_xy(2, 19) + t.bold("Effect Parameters (use ↑/↓ to select effect)"))
+        
+        # Show parameters for selected effect
+        effect_names = ["Chorus", "Delay", "Reverb", "Compression", "Crush"]
+        from synth_engine import EffectType
+        effect_types = [EffectType.CHORUS, EffectType.DELAY, EffectType.REVERB, EffectType.COMPRESSION, EffectType.CRUSH]
+        
+        # Determine which effect to show based on cursor position
+        if self.synth_cursor_param >= 5:  # Effect parameter editing
+            effect_idx = self.synth_cursor_param - 5
+            if effect_idx < len(effect_types):
+                selected_effect_type = effect_types[effect_idx]
+                bus = self.synth_engine.effects_buses[selected_effect_type]
+                params = bus.params
+                
+                buf.append(t.move_xy(4, 21) + t.bold(f"{effect_names[effect_idx]} Effect:"))
+                
+                # Draw effect-specific parameters with cursor
+                if selected_effect_type == EffectType.CHORUS:
+                    param_names = ["Enabled", "Rate", "Depth", "Feedback", "Wet Mix"]
+                    param_values = [
+                        f"{'ON' if params.enabled else 'OFF'}",
+                        f"{params.rate:.1f} Hz",
+                        f"{params.depth:.3f}s",
+                        f"{params.feedback:.2f}",
+                        f"{params.wet_mix:.2f}"
+                    ]
+                elif selected_effect_type == EffectType.DELAY:
+                    param_names = ["Enabled", "Time", "Feedback", "Cross Feedback", "Wet Mix"]
+                    param_values = [
+                        f"{'ON' if params.enabled else 'OFF'}",
+                        f"{params.time:.2f}s",
+                        f"{params.feedback:.2f}",
+                        f"{params.cross_feedback:.2f}",
+                        f"{params.wet_mix:.2f}"
+                    ]
+                elif selected_effect_type == EffectType.REVERB:
+                    param_names = ["Enabled", "Room Size", "Damping", "Width", "Wet Mix"]
+                    param_values = [
+                        f"{'ON' if params.enabled else 'OFF'}",
+                        f"{params.room_size:.2f}",
+                        f"{params.damping:.2f}",
+                        f"{params.width:.2f}",
+                        f"{params.wet_mix:.2f}"
+                    ]
+                elif selected_effect_type == EffectType.COMPRESSION:
+                    param_names = ["Enabled", "Threshold", "Ratio", "Attack", "Release", "Makeup", "Wet Mix"]
+                    param_values = [
+                        f"{'ON' if params.enabled else 'OFF'}",
+                        f"{params.threshold:.1f} dB",
+                        f"{params.ratio:.1f}:1",
+                        f"{params.attack:.3f}s",
+                        f"{params.release:.3f}s",
+                        f"{params.makeup_gain:.1f} dB",
+                        f"{params.wet_mix:.2f}"
+                    ]
+                elif selected_effect_type == EffectType.CRUSH:
+                    param_names = ["Enabled", "Bits", "Downsample", "Wet Mix"]
+                    param_values = [
+                        f"{'ON' if params.enabled else 'OFF'}",
+                        f"{params.bits}",
+                        f"{params.downsample}",
+                        f"{params.wet_mix:.2f}"
+                    ]
+                else:
+                    param_names = []
+                    param_values = []
+                
+                # Draw parameters with cursor
+                for i, (name, value) in enumerate(zip(param_names, param_values)):
+                    cursor = "▶ " if i == self.synth_effect_param_idx else "  "
+                    buf.append(t.move_xy(6, 22 + i) + cursor + f"{name}: {value}")
+        
+        # Footer
+        footer_y = h - 5
+        buf.append(t.move_xy(0, footer_y) + "─" * (w - 1))
+        controls = [
+            "↑/↓: Navigate Sends | SHIFT+←/→: Adjust Send Amount | TAB: Edit Effect",
+            "↑/↓: Navigate Parameters | SHIFT+←/→: Adjust Parameter | ENTER: Toggle Effect | ESC: Back"
+        ]
+        for i, ctrl in enumerate(controls):
+            buf.append(t.move_xy(2, footer_y + 1 + i) + t.magenta(ctrl))
+    
     def handle_synth_input(self, key):
         """Handle synth engine input"""
         if self.synth_view_mode == "channels":
@@ -1436,6 +1656,9 @@ class TRKR:
                 self.synth_cursor_param = 0
             elif key in ("d", "D"):
                 self.synth_view_mode = "drums"
+                self.synth_cursor_param = 0
+            elif key in ("e", "E"):
+                self.synth_view_mode = "effects"
                 self.synth_cursor_param = 0
             elif self._is_shift_left(key):
                 if key in ("g", "G"):  # Global volume
@@ -1584,6 +1807,222 @@ class TRKR:
                     types = ["lowpass", "highpass", "bandpass"]
                     idx = types.index(voice.drum_filter.filter_type)
                     voice.drum_filter.filter_type = types[(idx + 1) % len(types)]
+            elif key.name == "KEY_ESCAPE":
+                self.synth_view_mode = "channels"
+                
+        elif self.synth_view_mode == "effects":
+            voice = self.synth_engine.channels[self.synth_cursor_channel]
+            
+            if key.name == "KEY_UP":
+                if self.synth_cursor_param < 5:  # Effect sends
+                    self.synth_cursor_param = max(0, self.synth_cursor_param - 1)
+                else:  # Effect parameters - navigate individual parameters
+                    self.synth_effect_param_idx = max(0, self.synth_effect_param_idx - 1)
+            elif key.name == "KEY_DOWN":
+                if self.synth_cursor_param < 5:  # Effect sends
+                    self.synth_cursor_param = min(4, self.synth_cursor_param + 1)  # 5 effect sends
+                else:  # Effect parameters - navigate individual parameters
+                    # Get max parameters for current effect
+                    effect_idx = self.synth_cursor_param - 5
+                    if effect_idx == 0:  # Chorus
+                        max_params = 5
+                    elif effect_idx == 1:  # Delay
+                        max_params = 5
+                    elif effect_idx == 2:  # Reverb
+                        max_params = 5
+                    elif effect_idx == 3:  # Compression
+                        max_params = 7
+                    elif effect_idx == 4:  # Crush
+                        max_params = 4
+                    else:
+                        max_params = 5
+                    
+                    self.synth_effect_param_idx = min(max_params - 1, self.synth_effect_param_idx + 1)
+            elif key.name == "KEY_TAB":
+                # Switch between sends and effect parameters
+                if self.synth_cursor_param < 5:  # Currently on sends
+                    self.synth_cursor_param += 5  # Jump to effect parameters
+                    self.synth_effect_param_idx = 0  # Reset parameter cursor
+                else:  # Currently on effect parameters
+                    self.synth_cursor_param -= 5  # Back to sends
+            elif self._is_shift_left(key):
+                if self.synth_cursor_param < 5:  # Effect sends
+                    if self.synth_cursor_param == 0:
+                        voice.send_chorus = max(0.0, voice.send_chorus - 0.05)
+                    elif self.synth_cursor_param == 1:
+                        voice.send_delay = max(0.0, voice.send_delay - 0.05)
+                    elif self.synth_cursor_param == 2:
+                        voice.send_reverb = max(0.0, voice.send_reverb - 0.05)
+                    elif self.synth_cursor_param == 3:
+                        voice.send_compression = max(0.0, voice.send_compression - 0.05)
+                    elif self.synth_cursor_param == 4:
+                        voice.send_crush = max(0.0, voice.send_crush - 0.05)
+                else:  # Effect parameters
+                    from synth_engine import EffectType
+                    effect_types = [EffectType.CHORUS, EffectType.DELAY, EffectType.REVERB, EffectType.COMPRESSION, EffectType.CRUSH]
+                    effect_idx = self.synth_cursor_param - 5
+                    if 0 <= effect_idx < len(effect_types):
+                        bus = self.synth_engine.effects_buses[effect_types[effect_idx]]
+                        params = bus.params
+                        
+                        # Adjust individual parameter based on cursor position
+                        if effect_types[effect_idx] == EffectType.CHORUS:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Rate
+                                params.rate = max(0.1, params.rate - 0.1)
+                            elif self.synth_effect_param_idx == 2:  # Depth
+                                params.depth = max(0.001, params.depth - 0.001)
+                            elif self.synth_effect_param_idx == 3:  # Feedback
+                                params.feedback = max(0.0, params.feedback - 0.05)
+                            elif self.synth_effect_param_idx == 4:  # Wet Mix
+                                params.wet_mix = max(0.0, params.wet_mix - 0.05)
+                                
+                        elif effect_types[effect_idx] == EffectType.DELAY:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Time
+                                params.time = max(0.01, params.time - 0.01)
+                            elif self.synth_effect_param_idx == 2:  # Feedback
+                                params.feedback = max(0.0, params.feedback - 0.05)
+                            elif self.synth_effect_param_idx == 3:  # Cross Feedback
+                                params.cross_feedback = max(0.0, params.cross_feedback - 0.05)
+                            elif self.synth_effect_param_idx == 4:  # Wet Mix
+                                params.wet_mix = max(0.0, params.wet_mix - 0.05)
+                                
+                        elif effect_types[effect_idx] == EffectType.REVERB:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Room Size
+                                params.room_size = max(0.0, params.room_size - 0.05)
+                            elif self.synth_effect_param_idx == 2:  # Damping
+                                params.damping = max(0.0, params.damping - 0.05)
+                            elif self.synth_effect_param_idx == 3:  # Width
+                                params.width = max(0.0, params.width - 0.05)
+                            elif self.synth_effect_param_idx == 4:  # Wet Mix
+                                params.wet_mix = max(0.0, params.wet_mix - 0.05)
+                                
+                        elif effect_types[effect_idx] == EffectType.COMPRESSION:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Threshold
+                                params.threshold = max(-60.0, params.threshold - 1.0)
+                            elif self.synth_effect_param_idx == 2:  # Ratio
+                                params.ratio = max(1.0, params.ratio - 0.5)
+                            elif self.synth_effect_param_idx == 3:  # Attack
+                                params.attack = max(0.001, params.attack - 0.001)
+                            elif self.synth_effect_param_idx == 4:  # Release
+                                params.release = max(0.01, params.release - 0.01)
+                            elif self.synth_effect_param_idx == 5:  # Makeup Gain
+                                params.makeup_gain = max(-20.0, params.makeup_gain - 1.0)
+                            elif self.synth_effect_param_idx == 6:  # Wet Mix
+                                params.wet_mix = max(0.0, params.wet_mix - 0.05)
+                                
+                        elif effect_types[effect_idx] == EffectType.CRUSH:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Bits
+                                params.bits = max(1, params.bits - 1)
+                            elif self.synth_effect_param_idx == 2:  # Downsample
+                                params.downsample = max(1, params.downsample - 1)
+                            elif self.synth_effect_param_idx == 3:  # Wet Mix
+                                params.wet_mix = max(0.0, params.wet_mix - 0.05)
+                                
+            elif self._is_shift_right(key):
+                if self.synth_cursor_param < 5:  # Effect sends
+                    if self.synth_cursor_param == 0:
+                        voice.send_chorus = min(1.0, voice.send_chorus + 0.05)
+                    elif self.synth_cursor_param == 1:
+                        voice.send_delay = min(1.0, voice.send_delay + 0.05)
+                    elif self.synth_cursor_param == 2:
+                        voice.send_reverb = min(1.0, voice.send_reverb + 0.05)
+                    elif self.synth_cursor_param == 3:
+                        voice.send_compression = min(1.0, voice.send_compression + 0.05)
+                    elif self.synth_cursor_param == 4:
+                        voice.send_crush = min(1.0, voice.send_crush + 0.05)
+                else:  # Effect parameters
+                    from synth_engine import EffectType
+                    effect_types = [EffectType.CHORUS, EffectType.DELAY, EffectType.REVERB, EffectType.COMPRESSION, EffectType.CRUSH]
+                    effect_idx = self.synth_cursor_param - 5
+                    if 0 <= effect_idx < len(effect_types):
+                        bus = self.synth_engine.effects_buses[effect_types[effect_idx]]
+                        params = bus.params
+                        
+                        # Adjust individual parameter based on cursor position
+                        if effect_types[effect_idx] == EffectType.CHORUS:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Rate
+                                params.rate = min(10.0, params.rate + 0.1)
+                            elif self.synth_effect_param_idx == 2:  # Depth
+                                params.depth = min(0.1, params.depth + 0.001)
+                            elif self.synth_effect_param_idx == 3:  # Feedback
+                                params.feedback = min(1.0, params.feedback + 0.05)
+                            elif self.synth_effect_param_idx == 4:  # Wet Mix
+                                params.wet_mix = min(1.0, params.wet_mix + 0.05)
+                                
+                        elif effect_types[effect_idx] == EffectType.DELAY:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Time
+                                params.time = min(2.0, params.time + 0.01)
+                            elif self.synth_effect_param_idx == 2:  # Feedback
+                                params.feedback = min(0.95, params.feedback + 0.05)
+                            elif self.synth_effect_param_idx == 3:  # Cross Feedback
+                                params.cross_feedback = min(1.0, params.cross_feedback + 0.05)
+                            elif self.synth_effect_param_idx == 4:  # Wet Mix
+                                params.wet_mix = min(1.0, params.wet_mix + 0.05)
+                                
+                        elif effect_types[effect_idx] == EffectType.REVERB:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Room Size
+                                params.room_size = min(1.0, params.room_size + 0.05)
+                            elif self.synth_effect_param_idx == 2:  # Damping
+                                params.damping = min(1.0, params.damping + 0.05)
+                            elif self.synth_effect_param_idx == 3:  # Width
+                                params.width = min(1.0, params.width + 0.05)
+                            elif self.synth_effect_param_idx == 4:  # Wet Mix
+                                params.wet_mix = min(1.0, params.wet_mix + 0.05)
+                                
+                        elif effect_types[effect_idx] == EffectType.COMPRESSION:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Threshold
+                                params.threshold = min(0.0, params.threshold + 1.0)
+                            elif self.synth_effect_param_idx == 2:  # Ratio
+                                params.ratio = min(20.0, params.ratio + 0.5)
+                            elif self.synth_effect_param_idx == 3:  # Attack
+                                params.attack = min(0.1, params.attack + 0.001)
+                            elif self.synth_effect_param_idx == 4:  # Release
+                                params.release = min(2.0, params.release + 0.01)
+                            elif self.synth_effect_param_idx == 5:  # Makeup Gain
+                                params.makeup_gain = min(20.0, params.makeup_gain + 1.0)
+                            elif self.synth_effect_param_idx == 6:  # Wet Mix
+                                params.wet_mix = min(1.0, params.wet_mix + 0.05)
+                                
+                        elif effect_types[effect_idx] == EffectType.CRUSH:
+                            if self.synth_effect_param_idx == 0:  # Enabled
+                                params.enabled = not params.enabled
+                            elif self.synth_effect_param_idx == 1:  # Bits
+                                params.bits = min(16, params.bits + 1)
+                            elif self.synth_effect_param_idx == 2:  # Downsample
+                                params.downsample = min(32, params.downsample + 1)
+                            elif self.synth_effect_param_idx == 3:  # Wet Mix
+                                params.wet_mix = min(1.0, params.wet_mix + 0.05)
+                                
+            elif key.name == "KEY_ENTER" or key in ("\n", "\r"):
+                if self.synth_cursor_param < 5:  # Effect sends
+                    return  # No toggle for sends
+                else:  # Effect parameters
+                    from synth_engine import EffectType
+                    effect_types = [EffectType.CHORUS, EffectType.DELAY, EffectType.REVERB, EffectType.COMPRESSION, EffectType.CRUSH]
+                    effect_idx = self.synth_cursor_param - 5
+                    if 0 <= effect_idx < len(effect_types):
+                        bus = self.synth_engine.effects_buses[effect_types[effect_idx]]
+                        # Toggle enabled state when on first parameter
+                        if self.synth_effect_param_idx == 0:
+                            bus.params.enabled = not bus.params.enabled
             elif key.name == "KEY_ESCAPE":
                 self.synth_view_mode = "channels"
 

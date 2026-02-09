@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 """
-Improved Synth Engine for Terminal MIDI Phrase Tracker
-Based on classic drum synthesis techniques:
-- Proper resonant filtering
-- Tone + noise combinations
-- FM synthesis for metallic sounds
-- ADSR envelope control for expression
+TRKR SYNTH ENGINE
 
-FIXED VERSION:
-- Proper phase continuity to eliminate clicks
-- Filter state tracking for smooth filtering
 """
 
 import numpy as np
@@ -21,6 +13,7 @@ from typing import Optional, Dict, List
 from enum import Enum
 import time
 from scipy import signal
+from collections import deque
 
 
 class VoiceType(Enum):
@@ -65,6 +58,84 @@ class VoiceType(Enum):
     GLITCH_PERC = "Glitch Perc"
 
 
+class EffectType(Enum):
+    CHORUS = "Chorus"
+    DELAY = "Delay"
+    REVERB = "Reverb"
+    COMPRESSION = "Compression"
+    CRUSH = "Crush"
+
+
+@dataclass
+class EffectParams:
+    """Base class for effect parameters"""
+    enabled: bool = False
+    wet_mix: float = 0.5  # 0.0 to 1.0
+
+
+@dataclass
+class ChorusParams(EffectParams):
+    """Chorus effect parameters"""
+    rate: float = 1.5  # Hz
+    depth: float = 0.02  # seconds
+    feedback: float = 0.1
+
+
+@dataclass
+class DelayParams(EffectParams):
+    """Delay effect parameters"""
+    time: float = 0.3  # seconds
+    feedback: float = 0.4
+    cross_feedback: float = 0.0
+
+
+@dataclass
+class ReverbParams(EffectParams):
+    """Reverb effect parameters"""
+    room_size: float = 0.5  # 0.0 to 1.0
+    damping: float = 0.5  # 0.0 to 1.0
+    width: float = 1.0  # 0.0 to 1.0
+
+
+@dataclass
+class CompressionParams(EffectParams):
+    """Compression effect parameters"""
+    threshold: float = -20.0  # dB
+    ratio: float = 4.0  # 1.0 to 20.0
+    attack: float = 0.005  # seconds
+    release: float = 0.1  # seconds
+    makeup_gain: float = 0.0  # dB
+
+
+@dataclass
+class CrushParams(EffectParams):
+    """Bit crusher effect parameters"""
+    bits: int = 8  # 1 to 16
+    downsample: int = 1  # 1 to 32
+
+
+@dataclass
+class EffectsBus:
+    """Single effects bus with parameters and state"""
+    effect_type: EffectType
+    params: EffectParams
+    buffer_left: deque = field(default_factory=lambda: deque(maxlen=44100))  # 1 second buffer
+    buffer_right: deque = field(default_factory=lambda: deque(maxlen=44100))
+    
+    def __post_init__(self):
+        # Initialize proper parameters based on effect type
+        if self.effect_type == EffectType.CHORUS:
+            self.params = ChorusParams()
+        elif self.effect_type == EffectType.DELAY:
+            self.params = DelayParams()
+        elif self.effect_type == EffectType.REVERB:
+            self.params = ReverbParams()
+        elif self.effect_type == EffectType.COMPRESSION:
+            self.params = CompressionParams()
+        elif self.effect_type == EffectType.CRUSH:
+            self.params = CrushParams()
+
+
 @dataclass
 class ADSR:
     """ADSR envelope parameters (all in seconds)"""
@@ -106,8 +177,12 @@ class ChannelVoice:
     drum_release_envelope: float = 1.0  # 0.0 to 2.0, release multiplier for drums
     drum_filter: DrumFilter = field(default_factory=DrumFilter)
     
-    # Filter state for continuity between buffers
-    filter_state: float = 0.0
+    # Effects sends (0.0 to 1.0 for each effect bus)
+    send_chorus: float = 0.0
+    send_delay: float = 0.0
+    send_reverb: float = 0.0
+    send_compression: float = 0.0
+    send_crush: float = 0.0
     
 
 class SynthEngine:
@@ -120,6 +195,15 @@ class SynthEngine:
         
         # 8 channel voices
         self.channels = [ChannelVoice() for _ in range(8)]
+        
+        # Effects buses (5 parallel effects)
+        self.effects_buses = {
+            EffectType.CHORUS: EffectsBus(EffectType.CHORUS, ChorusParams()),
+            EffectType.DELAY: EffectsBus(EffectType.DELAY, DelayParams()),
+            EffectType.REVERB: EffectsBus(EffectType.REVERB, ReverbParams()),
+            EffectType.COMPRESSION: EffectsBus(EffectType.COMPRESSION, CompressionParams()),
+            EffectType.CRUSH: EffectsBus(EffectType.CRUSH, CrushParams()),
+        }
         
         # Active notes per channel
         self.active_notes: Dict[int, List[Dict]] = {i: [] for i in range(8)}
@@ -228,7 +312,8 @@ class SynthEngine:
                 'envelope_phase': 0.0,
                 'state': 'attack',
                 'release_time': None,
-                'is_drum': False
+                'is_drum': False,
+                'filter_state': 0.0  # Each note gets its own filter state
             }
         
         self.active_notes[channel].append(note_data)
@@ -285,15 +370,39 @@ class SynthEngine:
                 envelope = self._generate_envelope(note_data, frames, voice.adsr)
                 signal *= envelope
                 
-                # Apply filter with state tracking
-                signal, new_filter_state = self._apply_filter(signal, voice.filter, voice.filter_state)
-                voice.filter_state = new_filter_state
+                # Apply filter with per-note state tracking
+                signal, new_filter_state = self._apply_filter(signal, voice.filter, note_data.get('filter_state', 0.0))
+                note_data['filter_state'] = new_filter_state
                 
                 # Apply velocity
                 signal *= note_data['velocity']
                 
                 # Apply channel volume
                 signal *= voice.volume
+                
+                # CRITICAL: Apply anti-click fade AFTER all processing
+                # This ensures any filter transients are also smoothed out
+                if 'sample_count' not in note_data:
+                    note_data['sample_count'] = 0
+                
+                # Very long exponential fade-in for maximum smoothness
+                fade_duration = 512  # ~11.6ms at 44.1kHz
+                
+                if note_data['sample_count'] < fade_duration:
+                    fade_samples = min(fade_duration - note_data['sample_count'], frames)
+                    
+                    # Exponential curve is smoother than polynomial for audio
+                    t = np.linspace(
+                        note_data['sample_count'] / fade_duration,
+                        min((note_data['sample_count'] + fade_samples) / fade_duration, 1.0),
+                        fade_samples
+                    )
+                    # Exponential fade: 1 - e^(-6*t) approaches 1 smoothly
+                    fade_curve = 1.0 - np.exp(-6.0 * t)
+                    
+                    signal[:fade_samples] *= fade_curve
+                
+                note_data['sample_count'] += frames
                 
                 # Apply panning
                 left_gain = np.sqrt(1.0 - voice.pan)
@@ -315,8 +424,72 @@ class SynthEngine:
         # Clean up finished notes
         for note_data in notes_to_remove:
             self.active_notes[channel].remove(note_data)
+        
+        # Apply effects processing if any sends are active
+        if (voice.send_chorus > 0 or voice.send_delay > 0 or 
+            voice.send_reverb > 0 or voice.send_compression > 0 or voice.send_crush > 0):
+            output = self._apply_effects(output, voice)
             
         return output
+        
+    def _apply_effects(self, input_signal: np.ndarray, voice: ChannelVoice) -> np.ndarray:
+        """Apply all effects based on send amounts"""
+        if input_signal is None or len(input_signal) == 0:
+            return input_signal
+            
+        # Split stereo
+        input_left = input_signal[:, 0]
+        input_right = input_signal[:, 1]
+        
+        # Start with dry signal
+        output_left = input_left.copy()
+        output_right = input_right.copy()
+        
+        # Apply each effect based on send amount
+        if voice.send_chorus > 0:
+            chorus_left, chorus_right = self._process_chorus(
+                input_left, input_right, self.effects_buses[EffectType.CHORUS].params
+            )
+            output_left += chorus_left * voice.send_chorus
+            output_right += chorus_right * voice.send_chorus
+            
+        if voice.send_delay > 0:
+            delay_left, delay_right = self._process_delay(
+                input_left, input_right, self.effects_buses[EffectType.DELAY].params
+            )
+            output_left += delay_left * voice.send_delay
+            output_right += delay_right * voice.send_delay
+            
+        if voice.send_reverb > 0:
+            reverb_left, reverb_right = self._process_reverb(
+                input_left, input_right, self.effects_buses[EffectType.REVERB].params
+            )
+            output_left += reverb_left * voice.send_reverb
+            output_right += reverb_right * voice.send_reverb
+            
+        if voice.send_compression > 0:
+            comp_left, comp_right = self._process_compression(
+                input_left, input_right, self.effects_buses[EffectType.COMPRESSION].params
+            )
+            output_left += comp_left * voice.send_compression
+            output_right += comp_right * voice.send_compression
+            
+        if voice.send_crush > 0:
+            crush_left, crush_right = self._process_crush(
+                input_left, input_right, self.effects_buses[EffectType.CRUSH].params
+            )
+            output_left += crush_left * voice.send_crush
+            output_right += crush_right * voice.send_crush
+        
+        # Combine back to stereo
+        output = np.column_stack((output_left, output_right))
+        
+        # Prevent clipping
+        max_val = np.max(np.abs(output))
+        if max_val > 1.0:
+            output = output / max_val
+            
+        return output.astype(np.float32)
         
     def _generate_oscillator(self, voice_type: VoiceType, note_data: Dict, 
                             frames: int, detune: float) -> np.ndarray:
@@ -334,26 +507,31 @@ class SynthEngine:
         # Update stored phase with wrap-around to prevent overflow
         note_data['phase'] = (note_data['phase'] + frames * phase_inc) % (2.0 * np.pi)
         
+        # Generate waveform
         if voice_type == VoiceType.SINE:
-            return np.sin(phases).astype(np.float32)
+            waveform = np.sin(phases).astype(np.float32)
             
         elif voice_type == VoiceType.SQUARE:
-            return np.sign(np.sin(phases)).astype(np.float32)
+            waveform = np.sign(np.sin(phases)).astype(np.float32)
             
         elif voice_type == VoiceType.SAW:
-            # Sawtooth: normalize phase to -1 to 1
-            normalized_phase = (phases / np.pi) % 2.0 - 1.0
-            return normalized_phase.astype(np.float32)
+            # Sawtooth: -1 to 1 ramp, starts at 0
+            # Offset by 0.5 cycles so it starts at zero crossing
+            t = ((phases / (2.0 * np.pi)) + 0.5) % 1.0  # 0 to 1, offset
+            waveform = (2.0 * t - 1.0).astype(np.float32)
             
         elif voice_type == VoiceType.TRIANGLE:
-            # Triangle: fold the sawtooth
-            normalized_phase = (phases / np.pi) % 2.0 - 1.0
-            return (2.0 * np.abs(normalized_phase) - 1.0).astype(np.float32)
+            # Triangle: starts at 0, goes to 1, back through 0 to -1, back to 0
+            # Offset by 0.75 cycles so it starts at zero crossing
+            t = ((phases / (2.0 * np.pi)) + 0.75) % 1.0  # 0 to 1, offset
+            waveform = (2.0 * np.abs(2.0 * t - 1.0) - 1.0).astype(np.float32)
             
         elif voice_type == VoiceType.NOISE:
-            return (np.random.uniform(-1.0, 1.0, frames)).astype(np.float32)
-            
-        return np.zeros(frames, dtype=np.float32)
+            waveform = (np.random.uniform(-1.0, 1.0, frames)).astype(np.float32)
+        else:
+            waveform = np.zeros(frames, dtype=np.float32)
+        
+        return waveform
         
     def _is_drum_voice(self, voice_type: VoiceType) -> bool:
         """Check if voice type is a drum sound"""
@@ -944,6 +1122,218 @@ class SynthEngine:
         perc = tri * envelope
         
         return (perc * 0.6).astype(np.float32)
+    
+    # ──────────────────────────────────────────────────────────────────
+    # EFFECTS PROCESSING
+    # ──────────────────────────────────────────────────────────────────
+    
+    def _process_chorus(self, input_left: np.ndarray, input_right: np.ndarray, params: ChorusParams) -> tuple:
+        """Process chorus effect with simple, stable implementation"""
+        if not params.enabled:
+            return input_left, input_right
+            
+        length = len(input_left)
+        output_left = np.zeros_like(input_left)
+        output_right = np.zeros_like(input_right)
+        
+        # Simple chorus with minimal buffering
+        delay_samples = int(params.depth * self.sample_rate)
+        if delay_samples < 1:
+            delay_samples = 1
+            
+        # Create LFO for modulation
+        t = np.arange(length) / self.sample_rate
+        lfo = np.sin(2 * np.pi * params.rate * t)
+        
+        # Simple delay buffer using numpy arrays
+        for i in range(length):
+            # Calculate modulated delay
+            mod_delay = delay_samples * (0.5 + 0.5 * lfo[i])
+            mod_delay_samples = int(mod_delay)
+            
+            if i >= mod_delay_samples:
+                # Simple delayed sample
+                delayed_left = input_left[i - mod_delay_samples]
+                delayed_right = input_right[i - mod_delay_samples]
+            else:
+                delayed_left = 0
+                delayed_right = 0
+            
+            # Mix dry and wet signals
+            output_left[i] = input_left[i] + delayed_left * params.wet_mix * 0.3
+            output_right[i] = input_right[i] + delayed_right * params.wet_mix * 0.3
+        
+        return output_left, output_right
+    
+    def _process_delay(self, input_left: np.ndarray, input_right: np.ndarray, params: DelayParams) -> tuple:
+        """Process delay effect with simple, stable implementation"""
+        if not params.enabled:
+            return input_left, input_right
+            
+        length = len(input_left)
+        delay_samples = int(params.time * self.sample_rate)
+        if delay_samples < 1:
+            delay_samples = 1
+            
+        output_left = np.zeros_like(input_left)
+        output_right = np.zeros_like(input_right)
+        
+        # Simple delay using numpy arrays
+        for i in range(length):
+            # Get delayed sample
+            if i >= delay_samples:
+                delayed_left = output_left[i - delay_samples]  # Use output for feedback
+                delayed_right = output_right[i - delay_samples]
+            else:
+                delayed_left = 0
+                delayed_right = 0
+            
+            # Apply feedback
+            feedback_left = delayed_left * params.feedback * 0.3
+            feedback_right = delayed_right * params.feedback * 0.3
+            
+            # Mix dry signal with delayed+feedback signal
+            output_left[i] = input_left[i] + (delayed_left + feedback_left) * params.wet_mix * 0.5
+            output_right[i] = input_right[i] + (delayed_right + feedback_right) * params.wet_mix * 0.5
+        
+        return output_left, output_right
+    
+    def _process_reverb(self, input_left: np.ndarray, input_right: np.ndarray, params: ReverbParams) -> tuple:
+        """Process reverb effect with simple, stable implementation"""
+        if not params.enabled:
+            return input_left, input_right
+            
+        length = len(input_left)
+        output_left = np.zeros_like(input_left)
+        output_right = np.zeros_like(input_right)
+        
+        # Simple reverb with multiple delay taps
+        delays = [0.03, 0.07, 0.15]  # seconds - reduced taps
+        gains = [0.5, 0.3, 0.15]  # reduced gains
+        
+        # Process each delay tap
+        for delay, gain in zip(delays, gains):
+            delay_samples = int(delay * self.sample_rate)
+            if delay_samples < 1:
+                delay_samples = 1
+                
+            tap_left = np.zeros_like(input_left)
+            tap_right = np.zeros_like(input_right)
+            
+            for i in range(length):
+                if i >= delay_samples:
+                    tap_left[i] = input_left[i - delay_samples] * gain * params.room_size * 0.2
+                    tap_right[i] = input_right[i - delay_samples] * gain * params.room_size * 0.2
+            
+            output_left += tap_left
+            output_right += tap_right
+        
+        # Apply damping
+        damping_factor = 1.0 - (params.damping * 0.3)  # Reduced damping
+        output_left *= damping_factor
+        output_right *= damping_factor
+        
+        # Mix with dry signal
+        output_left = input_left + output_left * params.wet_mix * 0.3
+        output_right = input_right + output_right * params.wet_mix * 0.3
+        
+        return output_left, output_right
+    
+    def _process_compression(self, input_left: np.ndarray, input_right: np.ndarray, params: CompressionParams) -> tuple:
+        """Process compression effect with improved implementation"""
+        if not params.enabled:
+            return input_left, input_right
+            
+        # Convert threshold from dB to linear
+        threshold_linear = 10 ** (params.threshold / 20.0)
+        
+        # Attack and release time constants
+        attack_coeff = np.exp(-1.0 / (params.attack * self.sample_rate))
+        release_coeff = np.exp(-1.0 / (params.release * self.sample_rate))
+        
+        output_left = np.zeros_like(input_left)
+        output_right = np.zeros_like(input_right)
+        
+        # Compression state variables
+        envelope_left = 0
+        envelope_right = 0
+        gain_left = 1.0
+        gain_right = 1.0
+        
+        for i in range(len(input_left)):
+            # Get input levels
+            input_level_left = abs(input_left[i])
+            input_level_right = abs(input_right[i])
+            
+            # Update envelope followers
+            if input_level_left > envelope_left:
+                envelope_left = attack_coeff * envelope_left + (1 - attack_coeff) * input_level_left
+            else:
+                envelope_left = release_coeff * envelope_left + (1 - release_coeff) * input_level_left
+                
+            if input_level_right > envelope_right:
+                envelope_right = attack_coeff * envelope_right + (1 - attack_coeff) * input_level_right
+            else:
+                envelope_right = release_coeff * envelope_right + (1 - release_coeff) * input_level_right
+            
+            # Calculate gain reduction
+            if envelope_left > threshold_linear:
+                gain_left = threshold_linear / envelope_left
+                # Apply ratio
+                gain_left = threshold_linear + (envelope_left - threshold_linear) / params.ratio
+                gain_left = gain_left / envelope_left
+            else:
+                gain_left = 1.0
+                
+            if envelope_right > threshold_linear:
+                gain_right = threshold_linear / envelope_right
+                # Apply ratio
+                gain_right = threshold_linear + (envelope_right - threshold_linear) / params.ratio
+                gain_right = gain_right / envelope_right
+            else:
+                gain_right = 1.0
+            
+            # Apply compression
+            output_left[i] = input_left[i] * gain_left
+            output_right[i] = input_right[i] * gain_right
+        
+        # Apply makeup gain
+        makeup_linear = 10 ** (params.makeup_gain / 20.0)
+        output_left *= makeup_linear
+        output_right *= makeup_linear
+        
+        # Apply wet/dry mix
+        output_left = output_left * params.wet_mix + input_left * (1 - params.wet_mix)
+        output_right = output_right * params.wet_mix + input_right * (1 - params.wet_mix)
+        
+        return output_left, output_right
+    
+    def _process_crush(self, input_left: np.ndarray, input_right: np.ndarray, params: CrushParams) -> tuple:
+        """Process bit crusher effect"""
+        if not params.enabled:
+            return input_left, input_right
+            
+        # Bit reduction
+        max_val = (2 ** (params.bits - 1)) - 1
+        
+        # Quantize
+        crushed_left = np.round(input_left * max_val) / max_val
+        crushed_right = np.round(input_right * max_val) / max_val
+        
+        # Downsample
+        if params.downsample > 1:
+            crushed_left = crushed_left[::params.downsample]
+            crushed_right = crushed_right[::params.downsample]
+            
+            # Stretch back to original length
+            crushed_left = np.repeat(crushed_left, params.downsample)[:len(input_left)]
+            crushed_right = np.repeat(crushed_right, params.downsample)[:len(input_right)]
+        
+        # Apply wet/dry mix
+        output_left = crushed_left * params.wet_mix + input_left * (1 - params.wet_mix)
+        output_right = crushed_right * params.wet_mix + input_right * (1 - params.wet_mix)
+        
+        return output_left, output_right
     
     # ──────────────────────────────────────────────────────────────────
     # SYNTH VOICE HELPERS
