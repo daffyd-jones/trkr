@@ -995,7 +995,7 @@ class TRKR:
         # ── header ──
         buf.append(t.move_xy(0, 0) + t.bold("═" * (w - 1)))
 
-        title = " MIDI PHRASE TRACKER - ARRANGEMENT "
+        title = " MIDI TRKR - ARRANGEMENT "
         buf.append(t.move_xy(2, 1) + t.bold_cyan(title))
 
         play_status = (
